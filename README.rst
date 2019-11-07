@@ -19,13 +19,13 @@ Annotations are saved as XML files in PASCAL VOC format, the format used
 by `ImageNet <http://www.image-net.org/>`__.  Besides, it also supports YOLO format
 and a kind of Common XML format "cxml".
 
-.. image:: https://raw.githubusercontent.com/tzutalin/labelImg/master/demo/demo1.png
+.. image:: https://raw.githubusercontent.com/Jarvis73/labelImg/master/demo/demo1.png
      :alt: Demo Image
 
-.. image:: https://raw.githubusercontent.com/tzutalin/labelImg/master/demo/demo3.jpg
+.. image:: https://raw.githubusercontent.com/Jarvis73/labelImg/master/demo/demo3.jpg
      :alt: Demo Image
 
-.. image:: https://raw.githubusercontent.com/tzutalin/labelImg/master/demo/demo.jpg
+.. image:: https://raw.githubusercontent.com/Jarvis73/labelImg/master/demo/demo.jpg
      :alt: Demo Image
 
 `Watch a demo video <https://youtu.be/p0nR2YsCY_U>`__
@@ -232,7 +232,7 @@ Create pre-defined classes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 You can edit the
-`data/predefined\_classes.txt <https://github.com/tzutalin/labelImg/blob/master/data/predefined_classes.txt>`__
+`data/predefined\_classes.txt <https://github.com/Jarvis73/labelImg/blob/master/data/predefined_classes.txt>`__
 to load pre-defined classes
 
 Hotkeys
