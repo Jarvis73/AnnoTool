@@ -17,6 +17,10 @@ It is written in Python and uses Qt for its graphical interface.
 
 Annotations are saved as XML files in PASCAL VOC format, the format used
 by `ImageNet <http://www.image-net.org/>`__.  Besides, it also supports YOLO format
+and a kind of Common XML format "cxml".
+
+.. image:: https://raw.githubusercontent.com/tzutalin/labelImg/master/demo/demo1.png
+     :alt: Demo Image
 
 .. image:: https://raw.githubusercontent.com/tzutalin/labelImg/master/demo/demo3.jpg
      :alt: Demo Image
@@ -36,6 +40,12 @@ This repository is originally forked from `tzutalin/labelImg <https://github.com
 - Point
 
 All kinds of the annotations should be saved to `Common` format. Original `PascalVOC` and `YOLO` are only suitable for bounding box annotations.
+
+Supported image types:
+
+- 2D images: jpeg, png, bmp, ...
+
+- 3D images: nii, nii.gz
 
 
 Installation
