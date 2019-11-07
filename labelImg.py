@@ -1172,8 +1172,9 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.dim = TWO_D
                 else:
                     self.i3d = read3d(unicodeFilePath)
-                    self.i3d.setIntensityClip(high=600)
+                    self.i3d.setIntensityClip(low=-200, high=250)
                     self.dim = THREE_D
+                    self.set_format(FORMAT_COMMON)
                 self.labelFile = None
                 self.canvas.verified = False
 
@@ -1222,6 +1223,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.loadPascalXMLByFilename(xmlPath)
                 elif os.path.isfile(txtPath):
                     self.loadYOLOTXTByFilename(txtPath)
+                else:
+                    self.canvas.loadShapes({})
             else:
                 xmlPath = os.path.splitext(filePath)[0] + XML_EXT
                 txtPath = os.path.splitext(filePath)[0] + TXT_EXT
@@ -1233,6 +1236,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.loadPascalXMLByFilename(xmlPath)
                 elif os.path.isfile(txtPath):
                     self.loadYOLOTXTByFilename(txtPath)
+                else:
+                    self.canvas.loadShapes({})
 
             self.setWindowTitle(__appname__ + ' ' + filePath)
 
