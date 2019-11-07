@@ -42,9 +42,13 @@ from libs.pascal_voc_io import PascalVocReader, XML_EXT
 from libs.yolo_io import YoloReader, TXT_EXT
 from libs.common_io import CommonReader, COMM_EXT
 from libs.ustr import ustr
-from libs.hashableQListWidgetItem import HashableQListWidgetItem
+from libs.hashableQListWidgetItem import HashableQListWidgetItem, HashableQTableWidgetItem
+from libs.image3d import read3d, Image3d, Item3d, DSKey
+
 
 __appname__ = 'labelImg'
+TWO_D, THREE_D = list(range(2))
+
 
 class WindowMixin(object):
 
@@ -93,6 +97,16 @@ class MainWindow(QMainWindow, WindowMixin):
         self.labelHist = []
         self.lastOpenDir = None
 
+        # For image type, natural image(png, bmp, pbm, pgm, ppm, xbm, xpm) & 
+        # medical image(nii) are supported
+        # 
+        # Other natural image formats need extra plugins
+        # QtCore.QCoreApplication.addLibraryPath(r"<CondaEnvPath>\Library\plugins")
+        self.dim = TWO_D
+        self.i3d = None     # image 3d instance
+        self.idx = 0
+        self.axis = 0
+
         # Whether we need to save or not.
         self.dirty = False
 
@@ -109,6 +123,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.itemsToShapes = {}
         self.shapesToItems = {}
+        self.shapesToOthers = {}
         self.prevLabelText = ''
 
         listLayout = QVBoxLayout()
@@ -147,6 +162,31 @@ class MainWindow(QMainWindow, WindowMixin):
         self.labelList.itemChanged.connect(self.labelItemChanged)
         listLayout.addWidget(self.labelList)
 
+        # For multiple columns
+        table = QTableWidget()
+        table.itemActivated.connect(self.labelSelectionChanged)
+        table.itemSelectionChanged.connect(self.labelSelectionChanged)
+        table.itemDoubleClicked.connect(self.editLabel)
+        table.itemChanged.connect(self.labelItemChanged)
+        font = QFont()
+        font.setBold(True)
+        table.horizontalHeader().setFont(font)
+        # table.setFrameShape(QFrame.NoFrame)
+        table.horizontalHeader().setFixedHeight(25)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setColumnCount(3)
+        table.horizontalHeader().resizeSection(0, 40)
+        table.horizontalHeader().resizeSection(1, 80)
+        table.setHorizontalHeaderLabels([getStr('tableHeaderAxis'), getStr('tableHeaderSlice'),
+                                         getStr('tableHeaderLabel')])
+        table.horizontalHeader().setSectionsClickable(False)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setVisible(False)
+        self.labelTable = table
+        listLayout.addWidget(self.labelTable)
+
         self.dock = QDockWidget(getStr('boxLabelText'), self)
         self.dock.setObjectName(getStr('labels'))
         self.dock.setWidget(labelListContainer)
@@ -178,7 +218,7 @@ class MainWindow(QMainWindow, WindowMixin):
         }
         self.scrollArea = scroll
         self.canvas.scrollRequest.connect(self.scrollRequest)
-
+        
         self.canvas.newShape.connect(self.newShape)
         self.canvas.shapeMoved.connect(self.setDirty)
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
@@ -222,7 +262,7 @@ class MainWindow(QMainWindow, WindowMixin):
                       'Ctrl+S', 'save', getStr('saveDetail'), enabled=False)
 
         save_format = action('&Common', self.change_format,
-                      'Ctrl+', 'format_comm', getStr('changeSaveFormat'), enabled=True)
+                             'Ctrl+', 'format_comm', getStr('changeSaveFormat'), enabled=True)
 
         saveAs = action(getStr('saveAs'), self.saveFileAs,
                         'Ctrl+Shift+S', 'save-as', getStr('saveAsDetail'), enabled=False)
@@ -244,7 +284,7 @@ class MainWindow(QMainWindow, WindowMixin):
         create = action(getStr('crtBox'), self.createShape,
                         'w', 'new', getStr('crtBoxDetail'), enabled=False)
         createPoint = action(getStr('crtPoint'), self.createPoint,
-                        'e', 'new', getStr('crtPointDetail'), enabled=False)
+                             'e', 'new', getStr('crtPointDetail'), enabled=False)
         delete = action(getStr('delBox'), self.deleteSelectedShape,
                         'Delete', 'delete', getStr('delBoxDetail'), enabled=False)
         copy = action(getStr('dupBox'), self.copySelectedShape,
@@ -327,7 +367,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.drawSquaresOption.triggered.connect(self.toogleDrawSquare)
 
         # Store actions for further handling.
-        self.actions = struct(save=save, save_format=save_format, saveAs=saveAs, open=open, close=close, resetAll = resetAll,
+        self.actions = struct(save=save, save_format=save_format, saveAs=saveAs, open=open, close=close, resetAll=resetAll,
                               lineColor=color1, create=create, createPoint=createPoint, delete=delete, edit=edit, copy=copy,
                               createMode=createMode, createPointMode=createPointMode, editMode=editMode, advancedMode=advancedMode,
                               shapeLineColor=shapeLineColor, shapeFillColor=shapeFillColor,
@@ -477,6 +517,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Display cursor coordinates at the right of status bar
         self.labelCoordinates = QLabel('')
+        self.labelCoordinates.setMinimumWidth(200)
         self.statusBar().addPermanentWidget(self.labelCoordinates)
 
         # Open Dir if deafult file
@@ -586,6 +627,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.itemsToShapes.clear()
         self.shapesToItems.clear()
         self.labelList.clear()
+        self.labelTable.setRowCount(0)      # Keep table header
         self.filePath = None
         self.imageData = None
         self.labelFile = None
@@ -593,9 +635,18 @@ class MainWindow(QMainWindow, WindowMixin):
         self.labelCoordinates.clear()
 
     def currentItem(self):
-        items = self.labelList.selectedItems()
-        if items:
-            return items[0]
+        if self.dim == TWO_D:
+            items = self.labelList.selectedItems()
+            if items:
+                return items[0]
+        else:
+            items = self.labelTable.selectedItems()
+            if items:
+                # We only choice `label` cell for indexing
+                if len(items) > 2:
+                    return items[2]
+                else:   # Only `label` cell is selected
+                    return items[0]
         return None
 
     def addRecentFile(self, filePath):
@@ -715,7 +766,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.loadFile(filename)
 
     # Add chris
-    def btnstate(self, item= None):
+    def btnstate(self, item=None):
         """ Function to handle difficult examples
         Update on each object """
         if not self.canvas.editing():
@@ -749,23 +800,56 @@ class MainWindow(QMainWindow, WindowMixin):
             shape = self.canvas.selectedShape
             if shape:
                 self.shapesToItems[shape].setSelected(True)
+                if shape in self.shapesToItems:
+                    for item in self.shapesToOthers[shape]:
+                        item.setSelected(True)
             else:
-                self.labelList.clearSelection()
+                if self.dim == TWO_D:
+                    self.labelList.clearSelection()
+                else:
+                    self.labelTable.clearSelection()
         self.actions.delete.setEnabled(selected)
         self.actions.copy.setEnabled(selected)
         self.actions.edit.setEnabled(selected)
         self.actions.shapeLineColor.setEnabled(selected)
         self.actions.shapeFillColor.setEnabled(selected)
 
-    def addLabel(self, shape):
-        shape.paintLabel = self.displayLabelOption.isChecked()
-        item = HashableQListWidgetItem(shape.label)
-        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-        item.setCheckState(Qt.Checked)
-        item.setBackground(generateColorByText(shape.label))
-        self.itemsToShapes[item] = shape
-        self.shapesToItems[shape] = item
-        self.labelList.addItem(item)
+    def addLabel(self, shape, axis=None, idx=None):
+        if self.dim == TWO_D:
+            shape.paintLabel = self.displayLabelOption.isChecked()
+            item = HashableQListWidgetItem(shape.label)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setBackground(generateColorByText(shape.label))
+            self.itemsToShapes[item] = shape
+            self.shapesToItems[shape] = item
+            self.labelList.addItem(item)
+        else:
+            if axis is None:
+                axis = self.axis
+            if idx is None:
+                idx = self.idx
+            shape.paintLabel = self.displayLabelOption.isChecked()
+            row = self.labelTable.rowCount()
+            self.labelTable.setRowCount(row + 1)
+            color = generateColorByText(shape.label)
+            item0 = QTableWidgetItem(str(axis))
+            item0.setBackground(color)
+            item0.setFlags(item0.flags() ^ Qt.ItemIsEditable)
+            self.labelTable.setItem(row, 0, item0)
+            item1 = QTableWidgetItem(str(idx))
+            item1.setBackground(color)
+            item1.setFlags(item0.flags() ^ Qt.ItemIsEditable)
+            self.labelTable.setItem(row, 1, item1)
+            item = HashableQTableWidgetItem(shape.label)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            item.setBackground(color)
+            self.itemsToShapes[item] = shape
+            self.shapesToItems[shape] = item
+            self.shapesToOthers[shape] = [item0, item1]
+            self.labelTable.setItem(row, 2, item)
+
         for action in self.actions.onShapesPresent:
             action.setEnabled(True)
 
@@ -779,13 +863,18 @@ class MainWindow(QMainWindow, WindowMixin):
         del self.itemsToShapes[item]
 
     def loadLabels(self, shapes):
-        s = []
+        shapes_3d = {}
         for case in shapes:
-            if len(case) == 5:
+            if isinstance(case, (list, tuple)):
                 label, points, line_color, fill_color, difficult = case
                 dtype = Shape.RECTANGLE
-            elif len(case) == 6:
-                dtype, label, points, line_color, fill_color, difficult = case
+                axis = 0
+                sidx = 0
+            elif isinstance(case, dict):
+                dtype, label, points, line_color, fill_color, difficult = \
+                    case["type"], case["label"], case["shape"], case["color1"], case["color2"], case["difficult"]
+                axis = case.get("axis", 0)
+                sidx = case.get("slice", 0)
             else:
                 raise RuntimeError("Wrong shape:", case)
             
@@ -793,6 +882,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 shape = Shape(label=label)
             elif dtype == Shape.POINT:
                 shape = Point(label=label)
+            else:
+                raise TypeError("Not recognized shape type:", dtype)
             
             for x, y in points:
                 # Ensure the labels are within the bounds of the image. If not, fix them.
@@ -803,7 +894,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 shape.addPoint(QPointF(x, y))
             shape.difficult = difficult
             shape.close()
-            s.append(shape)
+
+            key = DSKey.ds2key(axis, sidx)
+            if key not in shapes_3d:
+                shapes_3d[key] = []
+            shapes_3d[key].append(shape)
 
             if line_color:
                 shape.line_color = QColor(*line_color)
@@ -815,9 +910,9 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 shape.fill_color = generateColorByText(label)
 
-            self.addLabel(shape)
+            self.addLabel(shape, axis, sidx)
 
-        self.canvas.loadShapes(s)
+        self.canvas.loadShapes(shapes_3d)
 
     def saveLabels(self, annotationFilePath):
         annotationFilePath = ustr(annotationFilePath)
@@ -825,16 +920,23 @@ class MainWindow(QMainWindow, WindowMixin):
             self.labelFile = LabelFile()
             self.labelFile.verified = self.canvas.verified
 
-        def format_shape(s):
-            return dict(label=s.label,
-                        dtype=s.type_,
-                        line_color=s.line_color.getRgb(),
-                        fill_color=s.fill_color.getRgb(),
-                        points=[(p.x(), p.y()) for p in s.points],
-                       # add chris
-                        difficult = s.difficult)
+        def format_shape(s, key=None):
+            formatted = dict(label=s.label,
+                             dtype=s.type_,
+                             line_color=s.line_color.getRgb(),
+                             fill_color=s.fill_color.getRgb(),
+                             points=[(p.x(), p.y()) for p in s.points],
+                             # add chris
+                             difficult=s.difficult)
+            if key:
+                formatted["axis"] = key[0]
+                formatted["slice"] = key[1]
+            return formatted
 
-        shapes = [format_shape(shape) for shape in self.canvas.shapes]
+        if self.dim == TWO_D:
+            shapes = [format_shape(shape) for shape in self.canvas.shapes_3d[DSKey.ds2key(0, 0)]]
+        else:
+            shapes = [format_shape(shape, DSKey.key2ds(key)) for key, shapes in self.canvas.shapes_3d.items() for shape in shapes]
         # Can add differrent annotation formats here
         try:
             if self.usingPascalVocFormat:
@@ -867,14 +969,18 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def labelSelectionChanged(self):
         item = self.currentItem()
+        if not isinstance(item, (HashableQTableWidgetItem, HashableQListWidgetItem)):
+            return
         if item and self.canvas.editing():
-            self._noSelectionSlot = True
+            self._noSelectionSlot = True    # Avoid selection loop between shape <-> item
             self.canvas.selectShape(self.itemsToShapes[item])
             shape = self.itemsToShapes[item]
             # Add Chris
             self.diffcButton.setChecked(shape.difficult)
 
     def labelItemChanged(self, item):
+        if not isinstance(item, (HashableQTableWidgetItem, HashableQListWidgetItem)):
+            return
         shape = self.itemsToShapes[item]
         label = item.text()
         if label != shape.label:
@@ -925,10 +1031,22 @@ class MainWindow(QMainWindow, WindowMixin):
             # self.canvas.undoLastLine()
             self.canvas.resetAllLines()
 
-    def scrollRequest(self, delta, orientation):
-        units = - delta / (8 * 15)
-        bar = self.scrollBars[orientation]
-        bar.setValue(bar.value() + bar.singleStep() * units)
+    def scrollRequest(self, delta, orientation, mode):
+        """
+        mode 0: only scroll inside image
+             1: 
+                TWO_D: the same as 0
+                THREE_D: slice scroll
+        """
+        if mode == 0 or self.dim == TWO_D:
+            units = - delta / (8 * 15)
+            bar = self.scrollBars[orientation]
+            bar.setValue(bar.value() + bar.singleStep() * units)
+        else:   # THREE_D
+            self.idx = self.i3d.check(self.idx, delta // 120)
+            self.image = self.i3d.at(self.idx, self.axis)
+            self.canvas.setPtr(0, self.idx)
+            self.canvas.loadPixmap(QPixmap.fromImage(self.image))
 
     def setZoom(self, value):
         self.actions.fitWidth.setChecked(False)
@@ -1049,11 +1167,24 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 # Load image:
                 # read data first and store for saving into label file.
-                self.imageData = read(unicodeFilePath, None)
+                if not self.is3dimage(unicodeFilePath):
+                    self.imageData = read(unicodeFilePath, None)
+                    self.dim = TWO_D
+                else:
+                    self.i3d = read3d(unicodeFilePath)
+                    self.i3d.setIntensityClip(high=600)
+                    self.dim = THREE_D
                 self.labelFile = None
                 self.canvas.verified = False
 
-            image = QImage.fromData(self.imageData)
+            if self.dim == TWO_D:
+                image = QImage.fromData(self.imageData)
+                self.labelList.setVisible(True)
+                self.labelTable.setVisible(False)
+            else:
+                image = self.i3d.at(self.idx, self.axis)
+                self.labelList.setVisible(False)
+                self.labelTable.setVisible(True)
             if image.isNull():
                 self.errorMessage(u'Error opening file',
                                   u"<p>Make sure <i>%s</i> is a valid image file." % unicodeFilePath)
@@ -1085,6 +1216,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 Common > PascalXML > YOLO
                 """
                 if os.path.isfile(cxmlPath):
+                    print("Load annotation: ", cxmlPath)
                     self.loadCommonXMLByFilename(cxmlPath)
                 elif os.path.isfile(xmlPath):
                     self.loadPascalXMLByFilename(xmlPath)
@@ -1095,6 +1227,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 txtPath = os.path.splitext(filePath)[0] + TXT_EXT
                 cxmlPath = os.path.splitext(filePath)[0] + COMM_EXT
                 if os.path.isfile(cxmlPath):
+                    print("Load annotation: ", cxmlPath)
                     self.loadCommonXMLByFilename(cxmlPath)
                 elif os.path.isfile(xmlPath):
                     self.loadPascalXMLByFilename(xmlPath)
@@ -1104,9 +1237,12 @@ class MainWindow(QMainWindow, WindowMixin):
             self.setWindowTitle(__appname__ + ' ' + filePath)
 
             # Default : select last item if there is at least one item
-            if self.labelList.count():
+            if self.dim == TWO_D and self.labelList.count():
                 self.labelList.setCurrentItem(self.labelList.item(self.labelList.count()-1))
                 self.labelList.item(self.labelList.count()-1).setSelected(True)
+            if self.dim == THREE_D and self.labelTable.rowCount():
+                self.labelTable.setCurrentItem(self.labelTable.item(self.labelTable.rowCount() - 1, 2))
+                self.labelTable.item(self.labelTable.rowCount() - 1, 2).setSelected(True)
 
             self.canvas.setFocus(True)
             return True
@@ -1183,8 +1319,11 @@ class MainWindow(QMainWindow, WindowMixin):
             self.loadFile(filename)
 
     def scanAllImages(self, folderPath):
+        # Priorities: 3d > 2d
         extensions = ['.%s' % fmt.data().decode("ascii").lower() for fmt in QImageReader.supportedImageFormats()]
+        extensions_3d = self.get3dformats()
         images = []
+        images_3d = []
 
         for root, dirs, files in os.walk(folderPath):
             for file in files:
@@ -1192,8 +1331,13 @@ class MainWindow(QMainWindow, WindowMixin):
                     relativePath = os.path.join(root, file)
                     path = ustr(os.path.abspath(relativePath))
                     images.append(path)
+                elif file.lower().endswith(tuple(extensions_3d)):
+                    relativePath = os.path.join(root, file)
+                    path = ustr(os.path.abspath(relativePath))
+                    images_3d.append(path)
         natural_sort(images, key=lambda x: x.lower())
-        return images
+        natural_sort(images_3d, key=lambda x: x.lower())
+        return images + images_3d
 
     def changeSavedirDialog(self, _value=False):
         if self.defaultSaveDir is not None:
@@ -1202,8 +1346,8 @@ class MainWindow(QMainWindow, WindowMixin):
             path = '.'
 
         dirpath = ustr(QFileDialog.getExistingDirectory(self,
-                                                       '%s - Save annotations to the directory' % __appname__, path,  QFileDialog.ShowDirsOnly
-                                                       | QFileDialog.DontResolveSymlinks))
+                                                        '%s - Save annotations to the directory' % __appname__, path,  QFileDialog.ShowDirsOnly
+                                                        | QFileDialog.DontResolveSymlinks))
 
         if dirpath is not None and len(dirpath) > 1:
             self.defaultSaveDir = dirpath
@@ -1237,10 +1381,10 @@ class MainWindow(QMainWindow, WindowMixin):
             defaultOpenDirPath = self.lastOpenDir
         else:
             defaultOpenDirPath = os.path.dirname(self.filePath) if self.filePath else '.'
-        if silent!=True :
-            targetDirPath = ustr(QFileDialog.getExistingDirectory(self,
-                                                         '%s - Open Directory' % __appname__, defaultOpenDirPath,
-                                                         QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks))
+        if silent != True :
+            targetDirPath = ustr(QFileDialog.getExistingDirectory(
+                self, '%s - Open Directory' % __appname__, defaultOpenDirPath,
+                QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks))
         else:
             targetDirPath = ustr(defaultOpenDirPath)
 
@@ -1335,7 +1479,9 @@ class MainWindow(QMainWindow, WindowMixin):
             return
         path = os.path.dirname(ustr(self.filePath)) if self.filePath else '.'
         formats = ['*.%s' % fmt.data().decode("ascii").lower() for fmt in QImageReader.supportedImageFormats()]
-        filters = "Image & Label files (%s)" % ' '.join(formats + ['*%s' % LabelFile.suffix])
+        filters_2d = "Image & Label files (%s)" % ' '.join(formats + ['*%s' % LabelFile.suffix])
+        filters_3d = "Medical image (%s)" % ' '.join(['*%s' % x for x in self.get3dformats()])
+        filters = ";;".join([filters_2d, filters_3d])
         filename = QFileDialog.getOpenFileName(self, '%s - Choose Image or Label file' % __appname__, path, filters)
         if filename:
             if isinstance(filename, (tuple, list)):
@@ -1489,7 +1635,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.set_format(FORMAT_YOLO)
         tYoloParseReader = YoloReader(txtPath, self.image)
         shapes = tYoloParseReader.getShapes()
-        print (shapes)
+        print(shapes)
         self.loadLabels(shapes)
         self.canvas.verified = tYoloParseReader.verified
 
@@ -1511,6 +1657,25 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def toogleDrawSquare(self):
         self.canvas.setDrawingShapeToSquare(self.drawSquaresOption.isChecked())
+
+    def get3dformats(self):
+        return ['.nii', '.nii.gz']
+
+    def is3dimage(self, filePath):
+        all3dformats = self.get3dformats()
+        if filePath.lower().endswith(tuple(all3dformats)):
+            return True
+        return False
+
+    def getPixel(self, x, y):
+        if 0 <= x < self.image.width() and 0 <= y < self.image.height():
+            if self.dim == TWO_D:
+                c = self.image.pixelColor(x, y)
+                return c.red(), c.green(), c.blue()
+            else:
+                return [self.i3d.pixel(self.idx, int(y), int(x), self.axis)]
+        else:
+            return 0, 0, 0
 
 def inverted(color):
     return QColor(*[255 - v for v in color.getRgb()])

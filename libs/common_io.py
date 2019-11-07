@@ -87,16 +87,18 @@ class CommonWriter:
         segmented.text = '0'
         return top
 
-    def addBndBox(self, xmin, ymin, xmax, ymax, name, difficult):
+    def addBndBox(self, xmin, ymin, xmax, ymax, name, difficult, **kwargs):
         bndbox = {'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}
         bndbox['name'] = name
         bndbox['difficult'] = difficult
+        bndbox.update(kwargs)
         self.boxlist.append(bndbox)
 
-    def addPnt(self, x, y, name, difficult):
+    def addPnt(self, x, y, name, difficult, **kwargs):
         pnt = {'x': x, 'y': y}
         pnt['name'] = name
         pnt['difficult'] = difficult
+        pnt.update(kwargs)
         self.pntlist.append(pnt)
 
     def appendObjects(self, top):
@@ -122,6 +124,12 @@ class CommonWriter:
             xmax.text = str(each_object['xmax'])
             ymax = SubElement(bndbox, 'ymax')
             ymax.text = str(each_object['ymax'])
+            if "axis" in each_object:
+                axis = SubElement(bndbox, "axis")
+                axis.text = str(each_object["axis"])
+            if "slice" in each_object:
+                axis = SubElement(bndbox, "slice")
+                axis.text = str(each_object["slice"])
 
         for each_object in self.pntlist:
             object_item = SubElement(top, 'object')
@@ -136,6 +144,12 @@ class CommonWriter:
             x.text = str(each_object['x'])
             y = SubElement(pnt, 'y')
             y.text = str(each_object['y'])
+            if "axis" in each_object:
+                axis = SubElement(pnt, "axis")
+                axis.text = str(each_object["axis"])
+            if "slice" in each_object:
+                axis = SubElement(pnt, "slice")
+                axis.text = str(each_object["slice"])
 
     def save(self, targetFile=None):
         root = self.genXML()
@@ -174,13 +188,49 @@ class CommonReader:
         xmax = int(float(bndbox.find('xmax').text))
         ymax = int(float(bndbox.find('ymax').text))
         points = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
-        self.shapes.append((Shape.RECTANGLE, label, points, None, None, 0))
+
+        shape = {
+            "type": Shape.RECTANGLE,
+            "label": label,
+            "shape": points,
+            "color1": None,
+            "color2": None,
+            "difficult": 0
+        }
+
+        axis = bndbox.find("axis")
+        if axis is not None:
+            shape["axis"] = int(axis.text)
+
+        slice_ = bndbox.find("slice")
+        if slice_ is not None:
+            shape["slice"] = int(slice_.text)
+
+        self.shapes.append(shape)
 
     def addPnt(self, label, pnt):
         x = int(float(pnt.find('x').text))
         y = int(float(pnt.find('y').text))
         points = [(x, y)]
-        self.shapes.append((Shape.POINT, label, points, None, None, 0))
+
+        shape = {
+            "type": Shape.POINT,
+            "label": label,
+            "shape": points,
+            "color1": None,
+            "color2": None,
+            "difficult": 0
+        }
+
+        axis = pnt.find("axis")
+        if axis is not None:
+            shape["axis"] = int(axis.text)
+
+        slice_ = pnt.find("slice")
+        if slice_ is not None:
+            shape["slice"] = int(slice_.text)
+
+        self.shapes.append(shape)
 
     def parseCXML(self):
         assert self.filepath.endswith(COMM_EXT), "Unsupport file format"

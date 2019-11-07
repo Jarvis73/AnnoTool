@@ -11,6 +11,7 @@ except ImportError:
 
 from libs.shape import Shape, Point
 from libs.utils import distance
+from libs.image3d import DSKey
 
 CURSOR_DEFAULT = Qt.ArrowCursor
 CURSOR_POINT = Qt.PointingHandCursor
@@ -18,16 +19,15 @@ CURSOR_DRAW = Qt.CrossCursor
 CURSOR_MOVE = Qt.ClosedHandCursor
 CURSOR_GRAB = Qt.OpenHandCursor
 
-# class Canvas(QGLWidget):
-
 
 class Canvas(QWidget):
     zoomRequest = pyqtSignal(int)
-    scrollRequest = pyqtSignal(int, int)
+    scrollRequest = pyqtSignal(int, int, int)
     newShape = pyqtSignal()
     selectionChanged = pyqtSignal(bool)
     shapeMoved = pyqtSignal()
     drawingPolygon = pyqtSignal(bool)
+    sliceChangeRequest = pyqtSignal(int)    # for 3d image
 
     CREATE, EDIT = list(range(2))
 
@@ -37,7 +37,9 @@ class Canvas(QWidget):
         super(Canvas, self).__init__(*args, **kwargs)
         # Initialise local state.
         self.mode = self.EDIT
-        self.shapes = []
+        self.shapes_3d = {DSKey.ds2key(0, 0): []}
+        self.ptr = DSKey.ds2key(0, 0)
+        self.shapes = self.shapes_3d[self.ptr]
         self.current = None         # A Shape instance, if you are drawing a shape
         self.selectedShape = None  # save the selected shape here
         self.selectedShapeCopy = None
@@ -64,6 +66,12 @@ class Canvas(QWidget):
         self.setFocusPolicy(Qt.WheelFocus)
         self.verified = False
         self.drawSquare = False
+
+    def setPtr(self, axis, index):
+        self.ptr = DSKey.ds2key(axis, index)
+        if self.ptr not in self.shapes_3d:
+            self.shapes_3d[self.ptr] = []
+        self.shapes = self.shapes_3d[self.ptr]
 
     def setDrawingColor(self, qColor):
         self.drawingLineColor = qColor
@@ -116,8 +124,9 @@ class Canvas(QWidget):
         # Update coordinates in status bar if image is opened
         window = self.parent().window()
         if window.filePath is not None:
+            value = self.parent().window().getPixel(pos.x(), pos.y())
             self.parent().window().labelCoordinates.setText(
-                'X: %d; Y: %d' % (pos.x(), pos.y()))
+                'X: %d; Y: %d;\t %s' % (pos.x(), pos.y(), ", ".join([str(x) for x in value])))
 
         # Polygon drawing.
         if self.drawing():
@@ -492,7 +501,8 @@ class Canvas(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform)
 
         p.scale(self.scale, self.scale)
-        p.translate(self.offsetToCenter())      #  Painter origin: (0, 0) if image is larger than canvas; (x, y) otherwise
+        #  Painter origin: (0, 0) if image is larger than canvas; (x, y) otherwise
+        p.translate(self.offsetToCenter())
 
         p.drawPixmap(0, 0, self.pixmap)
         Shape.scale = self.scale
@@ -653,9 +663,12 @@ class Canvas(QWidget):
         mods = ev.modifiers()
         if Qt.ControlModifier == int(mods) and v_delta:
             self.zoomRequest.emit(v_delta)
+        elif Qt.ShiftModifier == int(mods) and v_delta:
+            self.scrollRequest.emit(v_delta, Qt.Vertical, 0)    # 0: only scroll inside image
+        elif Qt.AltModifier == int(mods) and h_delta:
+            self.scrollRequest.emit(h_delta, Qt.Horizontal, 0)
         else:
-            v_delta and self.scrollRequest.emit(v_delta, Qt.Vertical)
-            h_delta and self.scrollRequest.emit(h_delta, Qt.Horizontal)
+            v_delta and self.scrollRequest.emit(v_delta, Qt.Vertical, 1)    # 1: (TWO_D: the same as 0, THREE_D: slice scroll)
         ev.accept()
 
     def keyPressEvent(self, ev):
@@ -738,12 +751,14 @@ class Canvas(QWidget):
         self.update()
 
     def loadPixmap(self, pixmap):
+        """ Make sure call setPtr() before this method"""
         self.pixmap = pixmap
-        self.shapes = []
+        self.shapes = self.shapes_3d[self.ptr]
         self.repaint()
 
-    def loadShapes(self, shapes):
-        self.shapes = list(shapes)
+    def loadShapes(self, shapes_3d):
+        self.shapes_3d = shapes_3d
+        self.setPtr(0, 0)
         self.current = None
         self.repaint()
 

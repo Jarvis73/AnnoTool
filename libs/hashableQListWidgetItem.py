@@ -26,3 +26,12 @@ class HashableQListWidgetItem(QListWidgetItem):
 
     def __hash__(self):
         return hash(id(self))
+
+
+class HashableQTableWidgetItem(QTableWidgetItem):
+
+    def __init__(self, *args):
+        super(HashableQTableWidgetItem, self).__init__(*args)
+
+    def __hash__(self):
+        return hash(id(self))

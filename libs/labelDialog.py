@@ -67,7 +67,14 @@ class LabelDialog(QDialog):
         self.edit.setSelection(0, len(text))
         self.edit.setFocus(Qt.PopupFocusReason)
         if move:
-            self.move(QCursor.pos())
+            pos = QCursor.pos()
+            x, y = pos.x(), pos.y()
+            # We cannot get accurate window size before it is displayed, so a fixed size is used.
+            if x + 250 > QApplication.desktop().screenGeometry().width():
+                x = max(0, x - 100)
+            if y + 250 > QApplication.desktop().screenGeometry().height():
+                y = max(0, y - 250)
+            self.move(QPoint(x, y))
         return self.edit.text() if self.exec_() else None
 
     def listItemClick(self, tQListWidgetItem):

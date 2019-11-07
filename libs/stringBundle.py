@@ -71,4 +71,3 @@ class StringBundle:
                 self.idToMessage[key] = value
 
             f.close()
-            
