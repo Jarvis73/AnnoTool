@@ -120,6 +120,9 @@ class LabelFile(object):
             if dtype == Shape.RECTANGLE:
                 bndbox = LabelFile.convertPoints2BndBox(points)
                 writer.addBndBox(bndbox[0], bndbox[1], bndbox[2], bndbox[3], label, difficult, **ext_items)
+            elif dtype == Shape.ELLIPSE:
+                bndbox = LabelFile.convertPoints2BndBox(points)
+                writer.addEllipseBox(bndbox[0], bndbox[1], bndbox[2], bndbox[3], label, difficult, **ext_items)
             elif dtype == Shape.POINT:
                 pnt = points[0]
                 writer.addPnt(int(pnt[0]), int(pnt[1]), label, difficult, **ext_items)

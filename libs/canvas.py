@@ -9,7 +9,7 @@ except ImportError:
 
 #from PyQt4.QtOpenGL import *
 
-from libs.shape import Shape, Point
+from libs.shape import Shape, Point, Ellipse
 from libs.utils import distance
 from libs.image3d import DSKey
 
@@ -45,7 +45,8 @@ class Canvas(QWidget):
         self.selectedShapeCopy = None
         self.drawingLineColor = QColor(0, 0, 255)
         self.drawingRectColor = QColor(0, 0, 255)
-        self.line = Shape(line_color=self.drawingLineColor)
+        self.line_r = Shape(line_color=self.drawingLineColor)
+        self.line_e = Ellipse(line_color=self.drawingLineColor)
         self.prevPoint = QPointF()
         self.offsets = QPointF(), QPointF()
         self.scale = 1.0
@@ -131,7 +132,7 @@ class Canvas(QWidget):
         # Polygon drawing.
         if self.drawing():
             self.overrideCursor(CURSOR_DRAW)
-            if self.current and self.current.type_ == Shape.RECTANGLE:
+            if self.current and self.current.type_ in [Shape.RECTANGLE, Shape.ELLIPSE]:
                 color = self.drawingLineColor
                 if self.outOfPixmap(pos):
                     # Don't allow the user to draw outside the pixmap.
@@ -152,11 +153,20 @@ class Canvas(QWidget):
                     min_size = min(abs(pos.x() - minX), abs(pos.y() - minY))
                     directionX = -1 if pos.x() - minX < 0 else 1
                     directionY = -1 if pos.y() - minY < 0 else 1
-                    self.line[1] = QPointF(minX + directionX * min_size, minY + directionY * min_size)
+                    if self.current.type_ == Shape.RECTANGLE:
+                        self.line_r[1] = QPointF(minX + directionX * min_size, minY + directionY * min_size)
+                    else:   # ellipse
+                        self.line_e[1] = QPointF(minX + directionX * min_size, minY + directionY * min_size)
                 else:
-                    self.line[1] = pos
+                    if self.current.type_ == Shape.RECTANGLE:
+                        self.line_r[1] = pos
+                    else:
+                        self.line_e[1] = pos
 
-                self.line.line_color = color
+                if self.current.type_ == Shape.RECTANGLE:
+                    self.line_r.line_color = color
+                else:
+                    self.line_e.line_color = color
                 self.prevPoint = QPointF()
                 self.current.highlightClear()
             else:
@@ -200,7 +210,7 @@ class Canvas(QWidget):
             if index is not None:
                 if self.selectedVertex():
                     self.hShape.highlightClear()
-                if shape.type_ == Shape.RECTANGLE:
+                if shape.type_ in [Shape.RECTANGLE, Shape.ELLIPSE]:
                     self.hVertex, self.hShape = index, shape
                     shape.highlightVertex(index, shape.MOVE_VERTEX)
                     self.overrideCursor(CURSOR_POINT)
@@ -241,7 +251,7 @@ class Canvas(QWidget):
 
         if ev.button() == Qt.LeftButton:
             if self.drawing():
-                if self._drawType == Shape.RECTANGLE:
+                if self._drawType in [Shape.RECTANGLE, Shape.ELLIPSE]:
                     self.handleDrawingRec(pos)
                 elif self._drawType == Shape.POINT:
                     self.handleDrawingPoint(pos)
@@ -273,7 +283,7 @@ class Canvas(QWidget):
         elif ev.button() == Qt.LeftButton:
             pos = self.transformPos(ev.pos())
             if self.drawing():
-                if self._drawType == Shape.RECTANGLE:
+                if self._drawType in [Shape.RECTANGLE, Shape.ELLIPSE]:
                     self.handleDrawingRec(pos)
                 elif self._drawType == Shape.POINT:
                     self.handleDrawingPoint(pos)
@@ -307,7 +317,7 @@ class Canvas(QWidget):
             initPos = self.current[0]
             minX = initPos.x()
             minY = initPos.y()
-            targetPos = self.line[1]
+            targetPos = self.line_r[1] if self._drawType == Shape.RECTANGLE else self.line_e[1]
             maxX = targetPos.x()
             maxY = targetPos.y()
             self.current.addPoint(QPointF(maxX, minY))
@@ -315,9 +325,15 @@ class Canvas(QWidget):
             self.current.addPoint(QPointF(minX, maxY))
             self.finalise()
         elif not self.outOfPixmap(pos):
-            self.current = Shape()
+            if self._drawType == Shape.RECTANGLE:
+                self.current = Shape()
+            elif self._drawType == Shape.ELLIPSE:
+                self.current = Ellipse()
             self.current.addPoint(pos)
-            self.line.points = [pos, pos]
+            if self._drawType == Shape.RECTANGLE:
+                self.line_r.points = [pos, pos]
+            else:
+                self.line_e.points = [pos, pos]
             self.setHiding()
             self.drawingPolygon.emit(True)
             self.update()
@@ -328,7 +344,8 @@ class Canvas(QWidget):
         elif not self.outOfPixmap(pos):
             self.current = Point()
             self.current.addPoint(pos)
-            self.line.points.clear()
+            self.line_r.points.clear()
+            self.line_e.points.clear()
             self.setHiding()
             self.drawingPolygon.emit(True)
             self.update()
@@ -364,7 +381,7 @@ class Canvas(QWidget):
             return
         for shape in reversed(self.shapes):
             if self.isVisible(shape):
-                if shape.type_ == Shape.RECTANGLE and shape.containsPoint(point):
+                if shape.type_ in [Shape.RECTANGLE, Shape.ELLIPSE] and shape.containsPoint(point):
                     self.selectShape(shape)
                     self.calculateOffsets(shape, point)
                     return
@@ -430,7 +447,7 @@ class Canvas(QWidget):
     def boundedMoveShape(self, shape, pos):
         if self.outOfPixmap(pos):
             return False  # No need to move
-        if shape.type_ == Shape.RECTANGLE:
+        if shape.type_ in [Shape.RECTANGLE, Shape.ELLIPSE]:
             o1 = pos + self.offsets[0]
             if self.outOfPixmap(o1):
                 pos -= QPointF(min(0, o1.x()), min(0, o1.y()))
@@ -465,7 +482,13 @@ class Canvas(QWidget):
     def deleteSelected(self):
         if self.selectedShape:
             shape = self.selectedShape
-            self.shapes.remove(self.selectedShape)
+            if shape in self.shapes:
+                self.shapes.remove(self.selectedShape)
+            else:
+                for _, shapes in self.shapes_3d.items():
+                    if shape in shapes:
+                        shapes.remove(shape)
+                        break
             self.selectedShape = None
             self.update()
             return shape
@@ -512,14 +535,17 @@ class Canvas(QWidget):
                 shape.paint(p)
         if self.current:
             self.current.paint(p)
-            self.line.paint(p)
+            if self._drawType == Shape.RECTANGLE:
+                self.line_r.paint(p)
+            elif self._drawType == Shape.ELLIPSE:
+                self.line_e.paint(p)
         if self.selectedShapeCopy:
             self.selectedShapeCopy.paint(p)
 
         # Paint rect
-        if self.current is not None and len(self.line) == 2:
-            leftTop = self.line[0]
-            rightBottom = self.line[1]
+        if self.current is not None and len(self.line_r) == 2:
+            leftTop = self.line_r[0]
+            rightBottom = self.line_r[1]
             rectWidth = rightBottom.x() - leftTop.x()
             rectHeight = rightBottom.y() - leftTop.y()
             p.setPen(self.drawingRectColor)
@@ -527,6 +553,7 @@ class Canvas(QWidget):
             p.setBrush(brush)
             p.drawRect(leftTop.x(), leftTop.y(), rectWidth, rectHeight)
 
+        # Cross line
         if self.drawing() and not self.prevPoint.isNull() and not self.outOfPixmap(self.prevPoint):
             p.setPen(QColor(0, 0, 0))
             p.drawLine(self.prevPoint.x(), 0, self.prevPoint.x(), self.pixmap.height())
@@ -564,8 +591,8 @@ class Canvas(QWidget):
     def finalise(self):
         """ Finalize a drawing """
         assert self.current
-        if (self.current.type_ == Shape.RECTANGLE and self.current.points[0] == self.current.points[-1]) or \
-                (self.current.type_ == Shape.POINT and self.current.points[0] != self.current.points[-1]):
+        if (self.current.type_ in [Shape.RECTANGLE, Shape.ELLIPSE] and self.current.points[0] == self.current.points[-1]) \
+                or (self.current.type_ == Shape.POINT and self.current.points[0] != self.current.points[-1]):
             self.current = None
             self.drawingPolygon.emit(False)
             self.update()
@@ -733,18 +760,21 @@ class Canvas(QWidget):
 
         return self.shapes[-1]
 
-    def undoLastLine(self):
-        assert self.shapes
-        self.current = self.shapes.pop()
-        self.current.setOpen()
-        self.line.points = [self.current[-1], self.current[0]]
-        self.drawingPolygon.emit(True)
+    # def undoLastLine(self):
+    #     assert self.shapes
+    #     self.current = self.shapes.pop()
+    #     self.current.setOpen()
+    #     self.line_r.points = [self.current[-1], self.current[0]]
+    #     self.drawingPolygon.emit(True)
 
     def resetAllLines(self):
         assert self.shapes
         self.current = self.shapes.pop()
         self.current.setOpen()
-        self.line.points = [self.current[-1], self.current[0]]
+        if self._drawType == Shape.RECTANGLE:
+            self.line_r.points = [self.current[-1], self.current[0]]
+        else:
+            self.line_e.points = [self.current[-1], self.current[0]]
         self.drawingPolygon.emit(True)
         self.current = None
         self.drawingPolygon.emit(False)

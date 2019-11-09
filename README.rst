@@ -39,6 +39,8 @@ This repository is originally forked from `tzutalin/labelImg <https://github.com
 
 - Point
 
+- Ellipse
+
 All kinds of the annotations should be saved to `Common` format. Original `PascalVOC` and `YOLO` are only suitable for bounding box annotations.
 
 Supported image types:
@@ -46,6 +48,11 @@ Supported image types:
 - 2D images: jpeg, png, bmp, ...
 
 - 3D images: nii, nii.gz
+
+New Features
+~~~~~~~~~~~~
+
+* Support 3d image segmentation with tensorflow_serving_api. (Need a toturial)
 
 
 Installation

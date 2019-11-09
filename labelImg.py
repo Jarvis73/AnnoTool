@@ -30,7 +30,7 @@ from libs.resources import *
 from libs.constants import *
 from libs.utils import *
 from libs.settings import Settings
-from libs.shape import Shape, Point, DEFAULT_LINE_COLOR, DEFAULT_FILL_COLOR
+from libs.shape import *
 from libs.stringBundle import StringBundle
 from libs.canvas import Canvas
 from libs.zoomWidget import ZoomWidget
@@ -103,7 +103,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # Other natural image formats need extra plugins
         # QtCore.QCoreApplication.addLibraryPath(r"<CondaEnvPath>\Library\plugins")
         self.dim = TWO_D
-        self.i3d = None     # image 3d instance
+        self.i3d: Image3d = None     # image 3d instance
         self.idx = 0
         self.axis = 0
 
@@ -129,10 +129,116 @@ class MainWindow(QMainWindow, WindowMixin):
         listLayout = QVBoxLayout()
         listLayout.setContentsMargins(0, 0, 0, 0)
 
+        #################################################################################
+        # For 3d image: settings
+        i3dSettingLayout = QVBoxLayout()
+        i3dSettingLayout.setContentsMargins(0, 0, 0, 0)
+
+        # window/level
+        self.int_low_str = QLabel(getStr("intLow"))
+        self.int_high_str = QLabel(getStr("intHigh"))
+        self.int_low = QSpinBox()
+        self.int_high = QSpinBox()
+        self.int_low.setRange(-10000, 10000)
+        self.int_high.setRange(-10000, 10000)
+        self.int_low.setValue(0)
+        self.int_high.setValue(600)
+        self.int_low.valueChanged.connect(self.update3dImageLow)
+        self.int_high.valueChanged.connect(self.update3dImageHigh)
+        lowHighQHBoxLayout = QHBoxLayout()
+        lowHighQHBoxLayout.addWidget(self.int_low_str)
+        lowHighQHBoxLayout.addWidget(self.int_low)
+        lowHighQHBoxLayout.addItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        lowHighQHBoxLayout.addWidget(self.int_high_str)
+        lowHighQHBoxLayout.addWidget(self.int_high)
+        self.lowHighContainer = QWidget()
+        self.lowHighContainer.setLayout(lowHighQHBoxLayout)
+        i3dSettingLayout.addWidget(self.lowHighContainer)
+
+        self.segResColor = QPushButton("Color")
+        self.segResColor.setStyleSheet("background-color: #00FF00; color: white")
+        self.segResColor.clicked.connect(self.segResColorPicker)
+        self.segResMode = QPushButton("Mask")
+        self.segResMode.clicked.connect(self.segResModeChanged)
+        segResLayout = QHBoxLayout()
+        segResLayout.addWidget(self.segResColor)
+        segResLayout.addWidget(self.segResMode)
+        self.segResContainer = QWidget()
+        self.segResContainer.setLayout(segResLayout)
+        i3dSettingLayout.addWidget(self.segResContainer)
+
+        self.segResSliderLabel = QLabel("Alpha: ")
+        self.segResSlider = QSlider(Qt.Horizontal)
+        self.segResSlider.setValue(0.5)
+        self.segResSlider.valueChanged.connect(self.segResSliderChanged)
+        self.segAutoCheckBox = QCheckBox("Auto: ")
+        self.segAutoCheckBox.setChecked(False)
+        self.segAutoCheckBox.setLayoutDirection(Qt.RightToLeft)
+        self.labelShowCheckBox = QCheckBox("Show: ")
+        self.labelShowCheckBox.setChecked(True)
+        self.labelShowCheckBox.setLayoutDirection(Qt.RightToLeft)
+        self.labelShowCheckBox.stateChanged.connect(self.labelShowStateChanged)
+        segResLayout2 = QHBoxLayout()
+        segResLayout2.addWidget(self.segResSliderLabel)
+        segResLayout2.addWidget(self.segResSlider)
+        segResLayout2.addWidget(self.segAutoCheckBox)
+        segResLayout2.addWidget(self.labelShowCheckBox)
+        self.segResContainer2 = QWidget()
+        self.segResContainer2.setLayout(segResLayout2)
+        i3dSettingLayout.addWidget(self.segResContainer2)
+
+        # segmentation algorithm
+        segAlgLabel = QLabel(getStr("segAlgLabel"))
+        self.segAlg = ["G-UNet SP NF", "Gnnu 3D NF"]
+        self.segAlgComboBox = QComboBox()
+        self.segAlgComboBox.addItems(self.segAlg)
+        segAlgLayout = QHBoxLayout()
+        segAlgLayout.addWidget(segAlgLabel)
+        segAlgLayout.addWidget(self.segAlgComboBox)
+        segAlgLayout.addItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        self.segAlgContainer = QWidget()
+        self.segAlgContainer.setLayout(segAlgLayout)
+        i3dSettingLayout.addWidget(self.segAlgContainer)
+
+        self.segAlgButtonRun = QPushButton(getStr("segAlgButtonRun"))
+        self.segAlgButtonRun.clicked.connect(self.segRun)
+        self.segAlgButtonRun.setShortcut(QKeySequence(Qt.Key_R))
+        self.segAlgButtonClear = QPushButton(getStr("segAlgButtonClear"))
+        self.segAlgButtonClear.clicked.connect(self.segClear)
+        self.segAlgButtonClear.setShortcut(QKeySequence(Qt.Key_C))
+        self.segAlgButtonUndo = QPushButton(getStr("segAlgButtonUndo"))
+        self.segAlgButtonUndo.clicked.connect(self.segUndo)
+        self.segAlgButtonUndo.setShortcut(QKeySequence(Qt.Key_U))
+        self.segAlgButtonSave = QPushButton(getStr("segAlgButtonSave"))
+        self.segAlgButtonSave.clicked.connect(self.segSave)
+        segAlgLayout2 = QHBoxLayout()
+        segAlgLayout2.addWidget(self.segAlgButtonRun)
+        segAlgLayout2.addWidget(self.segAlgButtonClear)
+        segAlgLayout2.addWidget(self.segAlgButtonUndo)
+        segAlgLayout2.addWidget(self.segAlgButtonSave)
+        self.segAlgContainer2 = QWidget()
+        self.segAlgContainer2.setLayout(segAlgLayout2)
+        i3dSettingLayout.addWidget(self.segAlgContainer2)
+
+        i3dSettingContainer = QGroupBox()
+        i3dSettingContainer.setStyleSheet("QGroupBox{padding-top:15px; margin-top:-15px}")
+        # i3dSettingContainer = QWidget()
+        i3dSettingContainer.setLayout(i3dSettingLayout)
+
+        self.settingDock = QDockWidget(getStr('i3dSetting'), self)
+        self.settingDock.setObjectName("3dSettingObj")
+        self.settingDock.setWidget(i3dSettingContainer)
+        self.settingDock.setFeatures(QDockWidget.DockWidgetFloatable)
+        self.settingDock.setVisible(False)
+
+        #################################################################################
+
         # Create a widget for using default label
         self.useDefaultLabelCheckbox = QCheckBox(getStr('useDefaultLabel'))
-        self.useDefaultLabelCheckbox.setChecked(False)
+        self.useDefaultLabelCheckbox.setChecked(True)
         self.defaultLabelTextLine = QLineEdit()
+        if len(self.labelHist) > 0:
+            self.defaultLabelTextLine.setText(self.labelHist[0])
         useDefaultLabelQHBoxLayout = QHBoxLayout()
         useDefaultLabelQHBoxLayout.addWidget(self.useDefaultLabelCheckbox)
         useDefaultLabelQHBoxLayout.addWidget(self.defaultLabelTextLine)
@@ -181,9 +287,8 @@ class MainWindow(QMainWindow, WindowMixin):
         table.horizontalHeader().resizeSection(1, 80)
         table.setHorizontalHeaderLabels([getStr('tableHeaderAxis'), getStr('tableHeaderSlice'),
                                          getStr('tableHeaderLabel')])
-        table.horizontalHeader().setSectionsClickable(False)
+        table.horizontalHeader().setSectionsClickable(True)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setVisible(False)
         self.labelTable = table
         listLayout.addWidget(self.labelTable)
 
@@ -225,6 +330,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
 
         self.setCentralWidget(scroll)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.settingDock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.filedock)
         self.filedock.setFeatures(QDockWidget.DockWidgetFloatable)
@@ -276,15 +382,19 @@ class MainWindow(QMainWindow, WindowMixin):
 
         createMode = action(getStr('crtBox'), self.setCreateMode,
                             'w', 'new', getStr('crtBoxDetail'), enabled=False)
+        createEllipseMode = action(getStr('crtEllipse'), self.setCreateEllipseMode,
+                                   'e', 'new', getStr('crtEllipseDetail'), enabled=False)
         createPointMode = action(getStr('crtPoint'), self.setCreatePointMode,
-                                 'e', 'new', getStr('crtPointDetail'), enabled=False)
+                                 'r', 'new', getStr('crtPointDetail'), enabled=False)
         editMode = action('&Edit\nRectBox', self.setEditMode,
                           'q', 'edit', u'Move and edit Boxs', enabled=False)
 
         create = action(getStr('crtBox'), self.createShape,
                         'w', 'new', getStr('crtBoxDetail'), enabled=False)
+        createEllipse = action(getStr('crtEllipse'), self.createEllipse,
+                               'e', 'new', getStr('crtEllipseDetail'), enabled=False)
         createPoint = action(getStr('crtPoint'), self.createPoint,
-                             'e', 'new', getStr('crtPointDetail'), enabled=False)
+                             'r', 'new', getStr('crtPointDetail'), enabled=False)
         delete = action(getStr('delBox'), self.deleteSelectedShape,
                         'Delete', 'delete', getStr('delBoxDetail'), enabled=False)
         copy = action(getStr('dupBox'), self.copySelectedShape,
@@ -368,8 +478,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Store actions for further handling.
         self.actions = struct(save=save, save_format=save_format, saveAs=saveAs, open=open, close=close, resetAll=resetAll,
-                              lineColor=color1, create=create, createPoint=createPoint, delete=delete, edit=edit, copy=copy,
-                              createMode=createMode, createPointMode=createPointMode, editMode=editMode, advancedMode=advancedMode,
+                              lineColor=color1, create=create, createEllipse=createEllipse, createPoint=createPoint,
+                              delete=delete, edit=edit, copy=copy,
+                              createMode=createMode, createEllipseMode=createEllipseMode, createPointMode=createPointMode,
+                              editMode=editMode, advancedMode=advancedMode,
                               shapeLineColor=shapeLineColor, shapeFillColor=shapeFillColor,
                               zoom=zoom, zoomIn=zoomIn, zoomOut=zoomOut, zoomOrg=zoomOrg,
                               fitWindow=fitWindow, fitWidth=fitWidth,
@@ -379,14 +491,15 @@ class MainWindow(QMainWindow, WindowMixin):
                               beginner=(), advanced=(),
                               editMenu=(edit, copy, delete,
                                         None, color1, self.drawSquaresOption),
-                              beginnerContext=(create, createPoint, edit, copy, delete),
-                              advancedContext=(createMode, createPointMode, editMode, edit, copy,
+                              beginnerContext=(create, createEllipse, createPoint, edit, copy, delete),
+                              advancedContext=(createMode, createEllipseMode, createPointMode, editMode, edit, copy,
                                                delete, shapeLineColor, shapeFillColor),
                               onLoadActive=(
-                                  close, create, createPoint, createMode, createPointMode, editMode),
+                                  close, create, createEllipse, createPoint,
+                                  createMode, createEllipseMode, createPointMode, editMode),
                               onShapesPresent=(saveAs, hideAll, showAll),
                               createActions=(
-                                  create, createPoint
+                                  create, createEllipse, createPoint
                               ))
 
         self.menus = struct(
@@ -436,12 +549,13 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.tools = self.toolbar('Tools')
         self.actions.beginner = (
-            open, opendir, changeSavedir, openNextImg, openPrevImg, verify, save, save_format, None, create, createPoint, copy, delete, None,
+            open, opendir, changeSavedir, openNextImg, openPrevImg, verify, save, save_format, None,
+            create, createEllipse, createPoint, copy, delete, None,
             zoomIn, zoom, zoomOut, fitWindow, fitWidth)
 
         self.actions.advanced = (
             open, opendir, changeSavedir, openNextImg, openPrevImg, save, save_format, None,
-            createMode, createPointMode, editMode, None,
+            createMode, createEllipseMode, createPointMode, editMode, None,
             hideAll, showAll)
 
         self.statusBar().showMessage('%s started.' % __appname__)
@@ -515,6 +629,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.populateModeActions()
 
+        # Display slice number, for 3d image
+        self.sliceNumber = QLabel('')
+        self.sliceNumber.setMinimumWidth(150)
+        self.statusBar().addPermanentWidget(self.sliceNumber)
+
         # Display cursor coordinates at the right of status bar
         self.labelCoordinates = QLabel('')
         self.labelCoordinates.setMinimumWidth(200)
@@ -572,6 +691,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.editButton.setVisible(not value)
         if value:
             self.actions.createMode.setEnabled(True)
+            self.actions.createEllipseMode.setEnabled(True)
             self.actions.createPointMode.setEnabled(True)
             self.actions.editMode.setEnabled(False)
             self.dock.setFeatures(self.dock.features() | self.dockFeatures)
@@ -588,8 +708,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.menus[0].clear()
         addActions(self.canvas.menus[0], menu)
         self.menus.edit.clear()
-        actions = (self.actions.create, self.actions.createPoint) if self.beginner()\
-            else (self.actions.createMode, self.actions.createPointMode, self.actions.editMode)
+        actions = (self.actions.create, self.actions.createEllipse, self.actions.createPoint) if self.beginner()\
+            else (self.actions.createMode, self.actions.createEllipseMode, self.actions.createPointMode,
+                  self.actions.editMode)
         addActions(self.menus.edit, actions + self.actions.editMenu)
 
     def setBeginner(self):
@@ -608,6 +729,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.dirty = False
         self.actions.save.setEnabled(False)
         self.actions.create.setEnabled(True)
+        self.actions.createEllipse.setEnabled(True)
         self.actions.createPoint.setEnabled(True)
 
     def toggleActions(self, value=True):
@@ -685,6 +807,11 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.setEditing(False, Shape.RECTANGLE)
         self.actions.create.setEnabled(False)
 
+    def createEllipse(self):
+        assert self.beginner()
+        self.canvas.setEditing(False, Shape.ELLIPSE)
+        self.actions.createEllipse.setEnabled(False)
+
     def createPoint(self):
         assert self.beginner()
         self.canvas.setEditing(False, Shape.POINT)
@@ -699,6 +826,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.canvas.setEditing(True)
             self.canvas.restoreCursor()
             self.actions.create.setEnabled(True)
+            self.actions.createEllipse.setEnabled(True)
             self.actions.createPoint.setEnabled(True)
 
     def toggleDrawMode(self, edit=True, drawType=None):
@@ -707,6 +835,10 @@ class MainWindow(QMainWindow, WindowMixin):
             self.actions.createMode.setEnabled(edit)
         else:
             self.actions.createMode.setEnabled(not edit)
+        if edit or drawType == Shape.ELLIPSE:
+            self.actions.createEllipseMode.setEnabled(edit)
+        else:
+            self.actions.createEllipseMode.setEnabled(not edit)
         if edit or drawType == Shape.POINT:
             self.actions.createPointMode.setEnabled(edit)
         else:
@@ -716,6 +848,10 @@ class MainWindow(QMainWindow, WindowMixin):
     def setCreateMode(self):
         assert self.advanced()
         self.toggleDrawMode(False, Shape.RECTANGLE)
+
+    def setCreateEllipseMode(self):
+        assert self.advanced()
+        self.toggleDrawMode(False, Shape.ELLIPSE)
 
     def setCreatePointMode(self):
         assert self.advanced()
@@ -800,7 +936,7 @@ class MainWindow(QMainWindow, WindowMixin):
             shape = self.canvas.selectedShape
             if shape:
                 self.shapesToItems[shape].setSelected(True)
-                if shape in self.shapesToItems:
+                if self.dim == THREE_D and shape in self.shapesToItems:
                     for item in self.shapesToOthers[shape]:
                         item.setSelected(True)
             else:
@@ -858,9 +994,15 @@ class MainWindow(QMainWindow, WindowMixin):
             # print('rm empty label')
             return
         item = self.shapesToItems[shape]
-        self.labelList.takeItem(self.labelList.row(item))
-        del self.shapesToItems[shape]
-        del self.itemsToShapes[item]
+        if self.dim == TWO_D:
+            self.labelList.takeItem(self.labelList.row(item))
+            del self.shapesToItems[shape]
+            del self.itemsToShapes[item]
+        else:
+            self.labelTable.removeRow(item.row())
+            del self.shapesToItems[shape]
+            del self.itemsToShapes[item]
+            del self.shapesToOthers[shape]
 
     def loadLabels(self, shapes):
         shapes_3d = {}
@@ -882,6 +1024,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 shape = Shape(label=label)
             elif dtype == Shape.POINT:
                 shape = Point(label=label)
+            elif dtype == Shape.ELLIPSE:
+                shape = Ellipse(label=label)
             else:
                 raise TypeError("Not recognized shape type:", dtype)
             
@@ -963,9 +1107,11 @@ class MainWindow(QMainWindow, WindowMixin):
             return False
 
     def copySelectedShape(self):
-        self.addLabel(self.canvas.copySelectedShape())
-        # fix copy and delete
-        self.shapeSelectionChanged(True)
+        shape = self.canvas.copySelectedShape()
+        if shape:
+            self.addLabel(shape)
+            # fix copy and delete
+            self.shapeSelectionChanged(True)
 
     def labelSelectionChanged(self):
         item = self.currentItem()
@@ -973,10 +1119,17 @@ class MainWindow(QMainWindow, WindowMixin):
             return
         if item and self.canvas.editing():
             self._noSelectionSlot = True    # Avoid selection loop between shape <-> item
-            self.canvas.selectShape(self.itemsToShapes[item])
             shape = self.itemsToShapes[item]
-            # Add Chris
-            self.diffcButton.setChecked(shape.difficult)
+            if self.dim == TWO_D:
+                # Add Chris
+                self.diffcButton.setChecked(shape.difficult)
+            else:
+                slice_index = int(self.shapesToOthers[shape][1].text())
+                self.idx = slice_index
+                self.canvas.setPtr(self.axis, self.idx)
+                self.canvas.deSelectShape()
+                self.updateCanvasImage()
+            self.canvas.selectShape(shape)
 
     def labelItemChanged(self, item):
         if not isinstance(item, (HashableQTableWidgetItem, HashableQListWidgetItem)):
@@ -990,12 +1143,19 @@ class MainWindow(QMainWindow, WindowMixin):
         else:  # User probably changed item visibility
             self.canvas.setShapeVisible(shape, item.checkState() == Qt.Checked)
 
+    def labelShowStateChanged(self):
+        state = self.labelShowCheckBox.checkState()
+        for i in range(self.labelTable.rowCount()):
+            self.labelTable.item(i, 2).setCheckState(state)
+
     # Callback functions:
     def newShape(self):
         """Pop-up and give focus to the label editor.
 
         position MUST be in global coordinates.
         """
+        if self.segAutoCheckBox.isChecked():
+            self.segRun()
         if not self.useDefaultLabelCheckbox.isChecked() or not self.defaultLabelTextLine.text():
             if len(self.labelHist) > 0:
                 self.labelDialog = LabelDialog(
@@ -1044,9 +1204,9 @@ class MainWindow(QMainWindow, WindowMixin):
             bar.setValue(bar.value() + bar.singleStep() * units)
         else:   # THREE_D
             self.idx = self.i3d.check(self.idx, delta // 120)
-            self.image = self.i3d.at(self.idx, self.axis)
-            self.canvas.setPtr(0, self.idx)
-            self.canvas.loadPixmap(QPixmap.fromImage(self.image))
+            self.canvas.setPtr(self.axis, self.idx)
+            self.canvas.deSelectShape()
+            self.updateCanvasImage()
 
     def setZoom(self, value):
         self.actions.fitWidth.setChecked(False)
@@ -1172,20 +1332,27 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.dim = TWO_D
                 else:
                     self.i3d = read3d(unicodeFilePath)
-                    self.i3d.setIntensityClip(low=-200, high=250)
+                    self.i3d.setIntensityClip(low=self.int_low.value(), high=self.int_high.value())
                     self.dim = THREE_D
                     self.set_format(FORMAT_COMMON)
                 self.labelFile = None
                 self.canvas.verified = False
 
             if self.dim == TWO_D:
+                self.sliceNumber.setText("")
                 image = QImage.fromData(self.imageData)
                 self.labelList.setVisible(True)
                 self.labelTable.setVisible(False)
+                self.settingDock.setVisible(False)
+                self.diffcButton.setVisible(True)
             else:
+                self.idx = 0
+                self.sliceNumber.setText("Slice: {:3d} / Total: {:3d}".format(self.idx, self.i3d.shape[self.axis]))
                 image = self.i3d.at(self.idx, self.axis)
                 self.labelList.setVisible(False)
                 self.labelTable.setVisible(True)
+                self.settingDock.setVisible(True)
+                self.diffcButton.setVisible(False)
             if image.isNull():
                 self.errorMessage(u'Error opening file',
                                   u"<p>Make sure <i>%s</i> is a valid image file." % unicodeFilePath)
@@ -1486,14 +1653,15 @@ class MainWindow(QMainWindow, WindowMixin):
         formats = ['*.%s' % fmt.data().decode("ascii").lower() for fmt in QImageReader.supportedImageFormats()]
         filters_2d = "Image & Label files (%s)" % ' '.join(formats + ['*%s' % LabelFile.suffix])
         filters_3d = "Medical image (%s)" % ' '.join(['*%s' % x for x in self.get3dformats()])
-        filters = ";;".join([filters_2d, filters_3d])
+        filters = ";;".join([filters_3d, filters_2d])
         filename = QFileDialog.getOpenFileName(self, '%s - Choose Image or Label file' % __appname__, path, filters)
-        if filename:
+        if filename[0]:
             if isinstance(filename, (tuple, list)):
                 filename = filename[0]
             self.loadFile(filename)
 
     def saveFile(self, _value=False):
+        """ save labels """
         if self.defaultSaveDir is not None and len(ustr(self.defaultSaveDir)):
             if self.filePath:
                 imgFileName = os.path.basename(self.filePath)
@@ -1682,6 +1850,78 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             return 0, 0, 0
 
+    def updateCanvasImage(self, image=None):
+        if image is not None:
+            self.image = image
+        else:
+            self.image = self.i3d.at(self.idx, self.axis)
+        self.sliceNumber.setText("Slice: {:3d} / Total: {:3d}".format(self.idx, self.i3d.shape[self.axis]))
+        self.canvas.loadPixmap(QPixmap.fromImage(self.image))
+
+    def update3dImageLow(self, value):
+        self.i3d.setIntensityClip(low=value)
+        self.updateCanvasImage()
+
+    def update3dImageHigh(self, value):
+        self.i3d.setIntensityClip(high=value)
+        self.updateCanvasImage()
+
+    def segRun(self):
+        segAlg = self.segAlgComboBox.currentText()
+        if self.i3d is not None and segAlg == self.segAlg[0]:
+            shapes = [(shape.points[0].y(), shape.points[0].x()) for shape in self.canvas.shapes]
+            success = self.i3d.gunet(self.idx, self.axis, mode="2d", shapes=shapes)
+            if success:
+                self.updateCanvasImage()
+        elif segAlg == self.segAlg[1]:
+            shapes = [(DSKey.key2ds(key)[1], shape.points[0].y(), shape.points[0].x())
+                      for key, shapes in self.canvas.shapes_3d.items() for shape in shapes]
+            success = self.i3d.gnnu3d(shapes)
+            if success:
+                self.updateCanvasImage()
+
+    def segClear(self):
+        if self.i3d is not None and self.idx in self.i3d.segCache:
+            self.i3d.segCache.pop(self.idx)
+            self.updateCanvasImage()
+
+    def segUndo(self):
+        if self.i3d is not None:
+            self.i3d.undo()
+            self.updateCanvasImage()
+
+    def segSave(self):
+        if self.i3d is not None and self.i3d.segCache:
+            pass
+
+    def segResModeChanged(self):
+        if self.i3d is None:
+            return
+        if self.segResMode.text() == "Mask":
+            self.segResMode.setText("Contour")
+            self.i3d.contour = True
+            self.updateCanvasImage()
+        else:
+            self.segResMode.setText("Mask")
+            self.i3d.contour = False
+            self.updateCanvasImage()
+
+    def segResColorPicker(self):
+        color = QColorDialog.getColor()
+        if sum(color.getRgb()[:3]) == 0:
+            return
+        if self.i3d is not None:
+            self.segResColor.setStyleSheet("background-color: %s; color: white" % color.name())
+            self.i3d.color = color.getRgb()[:3]
+            self.updateCanvasImage()
+
+    def segResSliderChanged(self):
+        if self.i3d is not None:
+            value = self.segResSlider.value() / 100
+            self.i3d.alpha = value
+            self.updateCanvasImage()
+
+
 def inverted(color):
     return QColor(*[255 - v for v in color.getRgb()])
 
@@ -1707,7 +1947,7 @@ def get_main_app(argv=[]):
     win = MainWindow(argv[1] if len(argv) >= 2 else None,
                      argv[2] if len(argv) >= 3 else os.path.join(
                          os.path.dirname(sys.argv[0]),
-                         'data', 'predefined_classes.txt'),
+                         'data', 'medical.txt'),
                      argv[3] if len(argv) >= 4 else None)
     win.show()
     return app, win

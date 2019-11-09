@@ -29,6 +29,7 @@ class CommonWriter:
         self.databaseSrc = databaseSrc
         self.imgSize = imgSize
         self.boxlist = []
+        self.elllist = []
         self.pntlist = []
         self.localImgPath = localImgPath
         self.verified = False
@@ -94,6 +95,13 @@ class CommonWriter:
         bndbox.update(kwargs)
         self.boxlist.append(bndbox)
 
+    def addEllipseBox(self, xmin, ymin, xmax, ymax, name, difficult, **kwargs):
+        bndbox = {'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}
+        bndbox['name'] = name
+        bndbox['difficult'] = difficult
+        bndbox.update(kwargs)
+        self.elllist.append(bndbox)
+
     def addPnt(self, x, y, name, difficult, **kwargs):
         pnt = {'x': x, 'y': y}
         pnt['name'] = name
@@ -101,8 +109,8 @@ class CommonWriter:
         pnt.update(kwargs)
         self.pntlist.append(pnt)
 
-    def appendObjects(self, top):
-        for each_object in self.boxlist:
+    def savebox(self, top, shapeList, cls):
+        for each_object in shapeList:
             object_item = SubElement(top, 'object')
             name = SubElement(object_item, 'name')
             name.text = ustr(each_object['name'])
@@ -115,7 +123,7 @@ class CommonWriter:
                 truncated.text = "1" # max == width or min
             else:
                 truncated.text = "0"
-            bndbox = SubElement(object_item, 'bndbox')
+            bndbox = SubElement(object_item, cls)
             xmin = SubElement(bndbox, 'xmin')
             xmin.text = str(each_object['xmin'])
             ymin = SubElement(bndbox, 'ymin')
@@ -130,6 +138,10 @@ class CommonWriter:
             if "slice" in each_object:
                 axis = SubElement(bndbox, "slice")
                 axis.text = str(each_object["slice"])
+
+    def appendObjects(self, top):
+        self.savebox(top, self.boxlist, 'bndbox')
+        self.savebox(top, self.elllist, 'ellipse')
 
         for each_object in self.pntlist:
             object_item = SubElement(top, 'object')
@@ -182,7 +194,7 @@ class CommonReader:
     def getShapes(self):
         return self.shapes
 
-    def addBndBox(self, label, bndbox):
+    def addBndBox(self, label, bndbox, dtype):
         xmin = int(float(bndbox.find('xmin').text))
         ymin = int(float(bndbox.find('ymin').text))
         xmax = int(float(bndbox.find('xmax').text))
@@ -190,7 +202,7 @@ class CommonReader:
         points = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
 
         shape = {
-            "type": Shape.RECTANGLE,
+            "type": dtype,
             "label": label,
             "shape": points,
             "color1": None,
@@ -249,7 +261,12 @@ class CommonReader:
 
             bndbox = object_iter.find("bndbox")
             if bndbox is not None:
-                self.addBndBox(label, bndbox)
+                self.addBndBox(label, bndbox, Shape.RECTANGLE)
+                continue
+
+            ellipse = object_iter.find("ellipse")
+            if ellipse is not None:
+                self.addBndBox(label, ellipse, Shape.ELLIPSE)
                 continue
             
             pnt = object_iter.find("pnt")
