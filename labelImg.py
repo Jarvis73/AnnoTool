@@ -7,9 +7,12 @@ import platform
 import re
 import sys
 import subprocess
+import time
 
 from functools import partial
 from collections import defaultdict
+import numpy as np
+import cv2
 
 try:
     from PyQt5.QtGui import *
@@ -43,7 +46,7 @@ from libs.yolo_io import YoloReader, TXT_EXT
 from libs.common_io import CommonReader, COMM_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem, HashableQTableWidgetItem
-from libs.image3d import read3d, Image3d, Item3d, DSKey
+from libs.image3d import read3d, Image3d, Item3d, DSKey, compute_robust_moments, write_nii
 
 
 __appname__ = 'labelImg'
@@ -106,6 +109,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.i3d: Image3d = None     # image 3d instance
         self.idx = 0
         self.axis = 0
+        self.total_time = 0
 
         # Whether we need to save or not.
         self.dirty = False
@@ -141,8 +145,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.int_high = QSpinBox()
         self.int_low.setRange(-10000, 10000)
         self.int_high.setRange(-10000, 10000)
-        self.int_low.setValue(0)
-        self.int_high.setValue(600)
+        self.int_low.setValue(settings.get(SETTING_INT_MIN, 0))
+        self.int_high.setValue(settings.get(SETTING_INT_MAX, 600))
         self.int_low.valueChanged.connect(self.update3dImageLow)
         self.int_high.valueChanged.connect(self.update3dImageHigh)
         lowHighQHBoxLayout = QHBoxLayout()
@@ -169,10 +173,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.segResSliderLabel = QLabel("Alpha: ")
         self.segResSlider = QSlider(Qt.Horizontal)
-        self.segResSlider.setValue(0.5)
+        self.segResSlider.setValue(settings.get(SETTING_ALPHA, 0.5))
         self.segResSlider.valueChanged.connect(self.segResSliderChanged)
         self.segAutoCheckBox = QCheckBox("Auto: ")
-        self.segAutoCheckBox.setChecked(False)
+        self.segAutoCheckBox.setChecked(settings.get(SETTING_AUTO_SEG, False))
         self.segAutoCheckBox.setLayoutDirection(Qt.RightToLeft)
         self.labelShowCheckBox = QCheckBox("Show: ")
         self.labelShowCheckBox.setChecked(True)
@@ -189,12 +193,32 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # segmentation algorithm
         segAlgLabel = QLabel(getStr("segAlgLabel"))
-        self.segAlg = ["G-UNet SP NF", "Gnnu 3D NF"]
+        self.segAlg = ["G-UNet SP NF", "Gnnu 3D NF Semi", "Gnnu 3D NF Both", "Gnnu 2D NF Both", "Gnnu 2D NF Semi",
+                       "G-UNet SP Liver"]
+        self.segName = ["112_nf_sp_dp", "nf_semi_3d", "nf_both_3d", "nf_both_2d", "nf_semi_2d",
+                        "012_gnet_sp_f0"]
         self.segAlgComboBox = QComboBox()
         self.segAlgComboBox.addItems(self.segAlg)
+        self.segBgCheckBox = QCheckBox("Background: ")
+        self.segBgCheckBox.setChecked(False)
+        self.segBgCheckBox.setLayoutDirection(Qt.RightToLeft)
+        self.segBgCheckBox.setShortcut(QKeySequence("Shift+F"))
+        self.segShowCheckBox = QCheckBox()
+        self.segShowCheckBox.setChecked(True)
+        self.segShowCheckBox.setVisible(True)
+        self.segShowCheckBox.setShortcut(QKeySequence(Qt.Key_S))
+        self.segShowCheckBox.stateChanged.connect(self.updateCanvasImage)
+        self.segShowLiverCheckBox = QCheckBox()
+        self.segShowLiverCheckBox.setChecked(True)
+        self.segShowLiverCheckBox.setVisible(True)
+        self.segShowLiverCheckBox.setShortcut(QKeySequence(Qt.Key_L))
+        self.segShowLiverCheckBox.stateChanged.connect(self.updateCanvasImage)
         segAlgLayout = QHBoxLayout()
         segAlgLayout.addWidget(segAlgLabel)
         segAlgLayout.addWidget(self.segAlgComboBox)
+        segAlgLayout.addWidget(self.segBgCheckBox)
+        segAlgLayout.addWidget(self.segShowLiverCheckBox)
+        segAlgLayout.addWidget(self.segShowCheckBox)
         segAlgLayout.addItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
         self.segAlgContainer = QWidget()
         self.segAlgContainer.setLayout(segAlgLayout)
@@ -203,14 +227,18 @@ class MainWindow(QMainWindow, WindowMixin):
         self.segAlgButtonRun = QPushButton(getStr("segAlgButtonRun"))
         self.segAlgButtonRun.clicked.connect(self.segRun)
         self.segAlgButtonRun.setShortcut(QKeySequence(Qt.Key_R))
+        self.segAlgButtonRun.setEnabled(False)
         self.segAlgButtonClear = QPushButton(getStr("segAlgButtonClear"))
         self.segAlgButtonClear.clicked.connect(self.segClear)
         self.segAlgButtonClear.setShortcut(QKeySequence(Qt.Key_C))
+        self.segAlgButtonClear.setEnabled(False)
         self.segAlgButtonUndo = QPushButton(getStr("segAlgButtonUndo"))
         self.segAlgButtonUndo.clicked.connect(self.segUndo)
         self.segAlgButtonUndo.setShortcut(QKeySequence(Qt.Key_U))
+        self.segAlgButtonUndo.setEnabled(False)
         self.segAlgButtonSave = QPushButton(getStr("segAlgButtonSave"))
         self.segAlgButtonSave.clicked.connect(self.segSave)
+        self.segAlgButtonSave.setEnabled(False)
         segAlgLayout2 = QHBoxLayout()
         segAlgLayout2.addWidget(self.segAlgButtonRun)
         segAlgLayout2.addWidget(self.segAlgButtonClear)
@@ -385,7 +413,7 @@ class MainWindow(QMainWindow, WindowMixin):
         createEllipseMode = action(getStr('crtEllipse'), self.setCreateEllipseMode,
                                    'e', 'new', getStr('crtEllipseDetail'), enabled=False)
         createPointMode = action(getStr('crtPoint'), self.setCreatePointMode,
-                                 'r', 'new', getStr('crtPointDetail'), enabled=False)
+                                 'f', 'new', getStr('crtPointDetail'), enabled=False)
         editMode = action('&Edit\nRectBox', self.setEditMode,
                           'q', 'edit', u'Move and edit Boxs', enabled=False)
 
@@ -394,7 +422,7 @@ class MainWindow(QMainWindow, WindowMixin):
         createEllipse = action(getStr('crtEllipse'), self.createEllipse,
                                'e', 'new', getStr('crtEllipseDetail'), enabled=False)
         createPoint = action(getStr('crtPoint'), self.createPoint,
-                             'r', 'new', getStr('crtPointDetail'), enabled=False)
+                             'f', 'new', getStr('crtPointDetail'), enabled=False)
         delete = action(getStr('delBox'), self.deleteSelectedShape,
                         'Delete', 'delete', getStr('delBoxDetail'), enabled=False)
         copy = action(getStr('dupBox'), self.copySelectedShape,
@@ -1154,6 +1182,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         position MUST be in global coordinates.
         """
+        self.segAlgButtonRun.setEnabled(True)
         if self.segAutoCheckBox.isChecked():
             self.segRun()
         if not self.useDefaultLabelCheckbox.isChecked() or not self.defaultLabelTextLine.text():
@@ -1348,11 +1377,15 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 self.idx = 0
                 self.sliceNumber.setText("Slice: {:3d} / Total: {:3d}".format(self.idx, self.i3d.shape[self.axis]))
-                image = self.i3d.at(self.idx, self.axis)
+                image = self.i3d.at(self.idx, self.axis,
+                                    self.segShowCheckBox.isChecked(), self.segShowLiverCheckBox.isChecked())
                 self.labelList.setVisible(False)
                 self.labelTable.setVisible(True)
                 self.settingDock.setVisible(True)
                 self.diffcButton.setVisible(False)
+                self.segAlgButtonRun.setEnabled(True)
+                self.segAlgButtonSave.setEnabled(True)
+                self.total_time = 0
             if image.isNull():
                 self.errorMessage(u'Error opening file',
                                   u"<p>Make sure <i>%s</i> is a valid image file." % unicodeFilePath)
@@ -1484,6 +1517,11 @@ class MainWindow(QMainWindow, WindowMixin):
         settings[SETTING_SINGLE_CLASS] = self.singleClassMode.isChecked()
         settings[SETTING_PAINT_LABEL] = self.displayLabelOption.isChecked()
         settings[SETTING_DRAW_SQUARE] = self.drawSquaresOption.isChecked()
+
+        settings[SETTING_AUTO_SEG] = self.segAutoCheckBox.isChecked()
+        settings[SETTING_ALPHA] = self.segResSlider.value()
+        settings[SETTING_INT_MIN] = self.int_low.value()
+        settings[SETTING_INT_MAX] = self.int_high.value()
         settings.save()
 
     def loadRecent(self, filename):
@@ -1851,48 +1889,154 @@ class MainWindow(QMainWindow, WindowMixin):
             return 0, 0, 0
 
     def updateCanvasImage(self, image=None):
-        if image is not None:
+        if isinstance(image, np.ndarray):
             self.image = image
         else:
-            self.image = self.i3d.at(self.idx, self.axis)
+            self.image = self.i3d.at(self.idx, self.axis,
+                                    self.segShowCheckBox.isChecked(), self.segShowLiverCheckBox.isChecked())
         self.sliceNumber.setText("Slice: {:3d} / Total: {:3d}".format(self.idx, self.i3d.shape[self.axis]))
         self.canvas.loadPixmap(QPixmap.fromImage(self.image))
 
     def update3dImageLow(self, value):
-        self.i3d.setIntensityClip(low=value)
-        self.updateCanvasImage()
+        if self.i3d and isinstance(value, int):
+            self.i3d.setIntensityClip(low=value)
+            self.updateCanvasImage()
 
     def update3dImageHigh(self, value):
-        self.i3d.setIntensityClip(high=value)
-        self.updateCanvasImage()
+        if self.i3d and isinstance(value, int):
+            self.i3d.setIntensityClip(high=value)
+            self.updateCanvasImage()
 
     def segRun(self):
         segAlg = self.segAlgComboBox.currentText()
-        if self.i3d is not None and segAlg == self.segAlg[0]:
-            shapes = [(shape.points[0].y(), shape.points[0].x()) for shape in self.canvas.shapes]
-            success = self.i3d.gunet(self.idx, self.axis, mode="2d", shapes=shapes)
+        if self.i3d is not None and segAlg in [self.segAlg[0], self.segAlg[5]]:
+            start = time.time()
+            name = self.segName[self.segAlg.index(segAlg)]
+            centers = {"fg": [], "bg": []}
+            stddevs = {"fg": [], "bg": []}
+            for shape in self.canvas.shapes:
+                if shape.type_ == Shape.POINT:
+                    key = "fg" if shape.fg else "bg"
+                    centers[key].append([shape.points[0].y(), shape.points[0].x()])
+                    stddevs[key].append([3., 3.] if shape.fg else [3., 3.])
+                elif shape.type_ == Shape.ELLIPSE:
+                    key = "fg" if shape.fg else "bg"
+                    x, y, w, h = shape.rect()
+                    center, stddev = compute_robust_moments([int(x), int(y), int(w), int(h)], self.i3d.shape[1:])
+                    centers[key].append(center)
+                    stddevs[key].append(stddev)
+            if len(centers["bg"]) == 0:
+                centers, stddevs = centers["fg"], stddevs["fg"]
+            success = self.i3d.gunet(self.idx, centers=centers, stddevs=stddevs, name=name)
+            diff = time.time() - start
             if success:
                 self.updateCanvasImage()
-        elif segAlg == self.segAlg[1]:
-            shapes = [(DSKey.key2ds(key)[1], shape.points[0].y(), shape.points[0].x())
-                      for key, shapes in self.canvas.shapes_3d.items() for shape in shapes]
-            success = self.i3d.gnnu3d(shapes)
+                self.segAlgButtonUndo.setEnabled(True)
+                self.segAlgButtonClear.setEnabled(True)
+                self.total_time += diff
+            elif success is None:
+                QMessageBox.critical(self, "Error", "Please select correct segmentation method.",
+                                     QMessageBox.Yes)
+        elif segAlg in self.segAlg[1:3]:
+            start = time.time()
+            name = self.segName[self.segAlg.index(segAlg)]
+            centers, stddevs = [], []
+            for key, shapes in self.canvas.shapes_3d.items():
+                for shape in shapes:
+                    if shape.type_ == Shape.POINT:
+                        centers.append([DSKey.key2ds(key)[1], shape.points[0].y(), shape.points[0].x()])
+                        stddevs.append([3., 5., 5.])
+                    elif shape.type_ == Shape.ELLIPSE:
+                        x, y, w, h = shape.rect()
+                        center, stddev = compute_robust_moments([int(x), int(y), int(w), int(h)], self.i3d.shape[1:])
+                        centers.append([DSKey.key2ds(key)[1]] + list(center))
+                        stddevs.append([3.] + list(stddev))
+            success = self.i3d.gnnu3d(name, centers, stddevs)
+            diff = time.time() - start
             if success:
                 self.updateCanvasImage()
+                self.segAlgButtonUndo.setEnabled(True)
+                self.segAlgButtonClear.setEnabled(True)
+                self.total_time += diff
+            elif success is None:
+                QMessageBox.critical(self, "Error", "Please select correct segmentation method.",
+                                     QMessageBox.Yes)
+        elif self.i3d is not None and segAlg in self.segAlg[3:5]:
+            name = self.segName[self.segAlg.index(segAlg)]
+            centers, stddevs = [], []
+            for shape in self.canvas.shapes:
+                if shape.type_ == Shape.POINT:
+                    centers.append([shape.points[0].y(), shape.points[0].x()])
+                    stddevs.append([4., 4.])
+                elif shape.type_ == Shape.ELLIPSE:
+                    x, y, w, h = shape.rect()
+                    center, stddev = compute_robust_moments([int(x), int(y), int(w), int(h)], self.i3d.shape[1:])
+                    centers.append(center)
+                    stddevs.append(stddev)
+            success = self.i3d.gnnu2d(name=name, i=self.idx, centers=centers, stddevs=stddevs)
+            if success:
+                self.updateCanvasImage()
+                self.segAlgButtonUndo.setEnabled(True)
+                self.segAlgButtonClear.setEnabled(True)
+            elif success is None:
+                QMessageBox.critical(self, "Error", "Please select correct segmentation method.",
+                                     QMessageBox.Yes)
 
     def segClear(self):
         if self.i3d is not None and self.idx in self.i3d.segCache:
             self.i3d.segCache.pop(self.idx)
             self.updateCanvasImage()
+        elif self.i3d is not None and isinstance(self.i3d.segCache, np.ndarray):
+            self.i3d.backup = self.i3d.segCache
+            self.i3d.backup_idx = Image3d.BK_SECOND
+            self.i3d.segCache = {}
+            self.segAlgButtonClear.setEnabled(False)
+            self.updateCanvasImage()
 
     def segUndo(self):
         if self.i3d is not None:
-            self.i3d.undo()
+            res = self.i3d.undo()
+            if res == Image3d.BK_DEFAULT:
+                self.segAlgButtonUndo.setEnabled(False)
             self.updateCanvasImage()
 
     def segSave(self):
-        if self.i3d is not None and self.i3d.segCache:
-            pass
+        if self.i3d is not None and len(self.i3d.segCache) > 0:
+            if isinstance(self.i3d.segCache, np.ndarray) or self.idx in self.i3d.segCache:
+                # Count interaction numbers
+                # count = 0
+                # for i in range(self.labelTable.rowCount()):
+                #     idx = int(self.labelTable.item(i, 1).text())
+                #     if idx == self.idx:
+                #         count += 1
+                saveFile = self.saveSegDialog("-{}-{}-lab".format(self.labelTable.rowCount(),
+                                                                  int(self.total_time * 1000)), removeExt=True)
+                if saveFile:
+                    if isinstance(self.i3d.segCache, dict):
+                        seg = np.zeros(self.i3d.shape, dtype=np.uint8)
+                        for i in self.i3d.segCache:
+                            seg[i] = self.i3d.segCache[i]
+                    else:
+                        seg = self.i3d.segCache
+                    write_nii(seg, self.i3d.meta.meta, saveFile + ".nii.gz")
+
+    def saveSegDialog(self, suffix, removeExt=True):
+        caption = '%s - Choose File' % __appname__
+        filters = 'File (*.nii.gz)'
+        openDialogPath = self.currentPath()
+        dlg = QFileDialog(self, caption, openDialogPath, filters)
+        dlg.setDefaultSuffix(".png")
+        dlg.setAcceptMode(QFileDialog.AcceptSave)
+        filenameWithoutExtension = os.path.basename(self.filePath).split(".")[0] + suffix
+        dlg.selectFile(filenameWithoutExtension)
+        dlg.setOption(QFileDialog.DontUseNativeDialog, False)
+        if dlg.exec_():
+            fullFilePath = ustr(dlg.selectedFiles()[0])
+            if removeExt:
+                return os.path.splitext(fullFilePath)[0] # Return file path without the extension.
+            else:
+                return fullFilePath
+        return ''
 
     def segResModeChanged(self):
         if self.i3d is None:

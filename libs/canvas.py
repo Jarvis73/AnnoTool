@@ -31,7 +31,7 @@ class Canvas(QWidget):
 
     CREATE, EDIT = list(range(2))
 
-    epsilon = 11.0
+    epsilon = 3.0
 
     def __init__(self, *args, **kwargs):
         super(Canvas, self).__init__(*args, **kwargs)
@@ -328,7 +328,7 @@ class Canvas(QWidget):
             if self._drawType == Shape.RECTANGLE:
                 self.current = Shape()
             elif self._drawType == Shape.ELLIPSE:
-                self.current = Ellipse()
+                self.current = Ellipse(foreground=not self.parent().window().segBgCheckBox.checkState())
             self.current.addPoint(pos)
             if self._drawType == Shape.RECTANGLE:
                 self.line_r.points = [pos, pos]
@@ -342,7 +342,7 @@ class Canvas(QWidget):
         if self.current:
             self.finalise()
         elif not self.outOfPixmap(pos):
-            self.current = Point()
+            self.current = Point(foreground=not self.parent().window().segBgCheckBox.checkState())
             self.current.addPoint(pos)
             self.line_r.points.clear()
             self.line_e.points.clear()

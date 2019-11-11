@@ -23,6 +23,7 @@ DEFAULT_VERTEX_FILL_COLOR = QColor(0, 255, 0, 255)
 DEFAULT_HVERTEX_FILL_COLOR = QColor(255, 0, 0)
 MIN_Y_LABEL = 10
 DEFAULT_POINT_FILL_COLOR = QColor(255, 0, 0)
+DEFAULT_BG_FILL_COLOR = QColor(255, 0, 255)
 
 
 class Shape(object):
@@ -47,6 +48,7 @@ class Shape(object):
     point_size = 8
     scale = 1.0
     type_ = RECTANGLE
+    bg_fill_color = DEFAULT_BG_FILL_COLOR
 
     def __init__(self, label=None, line_color=None, difficult=False, paintLabel=False):
         self.label = label
@@ -93,6 +95,18 @@ class Shape(object):
 
     def setOpen(self):
         self._closed = False
+
+    def rect(self):
+        min_x = sys.maxsize
+        min_y = sys.maxsize
+        max_x = -sys.maxsize
+        max_y = -sys.maxsize
+        for p in self.points:
+            min_x = min(min_x, p.x())
+            min_y = min(min_y, p.y())
+            max_x = max(max_x, p.x())
+            max_y = max(max_y, p.y())
+        return min_x, min_y, max_x - min_x, max_y - min_y
 
     def paint(self, painter):
         if self.points:
@@ -222,8 +236,9 @@ class Shape(object):
 class Point(Shape):
     vertex_fill_color = DEFAULT_POINT_FILL_COLOR
 
-    def __init__(self, label=None, difficult=False, paintLabel=False):
+    def __init__(self, label=None, difficult=False, paintLabel=False, foreground=True):
         self.type_ = Shape.POINT
+        self.fg = foreground
         super(Point, self).__init__(label, None, difficult, paintLabel)
         
     def paint(self, painter):
@@ -231,7 +246,7 @@ class Point(Shape):
             if self.selected:
                 color = self.select_line_color
                 self.highlightVertex(0, Shape.MOVE_VERTEX)
-            else: 
+            else:
                 color = self.line_color
             pen = QPen(color)
             # Try using integer sizes for smoother drawing(?)
@@ -242,7 +257,7 @@ class Point(Shape):
             for i, p in enumerate(self.points):
                 self.drawVertex(vrtx_path, i)
             painter.drawPath(vrtx_path)
-            painter.fillPath(vrtx_path, self.vertex_fill_color)
+            painter.fillPath(vrtx_path, self.vertex_fill_color if self.fg else self.bg_fill_color)
             
             # Draw text at the top-left
             if self.paintLabel:
@@ -287,38 +302,27 @@ class Point(Shape):
 
 
 class Ellipse(Shape):
-    def __init__(self, label=None, line_color=None, difficult=False, paintLabel=False):
+    def __init__(self, label=None, line_color=None, difficult=False, paintLabel=False, foreground=True):
         self.type_ = Shape.ELLIPSE
+        self.fg = foreground
         super(Ellipse, self).__init__(label, line_color, difficult, paintLabel)
-
-    def rect(self):
-        min_x = sys.maxsize
-        min_y = sys.maxsize
-        max_x = -sys.maxsize
-        max_y = -sys.maxsize
-        for p in self.points:
-            min_x = min(min_x, p.x())
-            min_y = min(min_y, p.y())
-            max_x = max(max_x, p.x())
-            max_y = max(max_y, p.y())
-        return min_x, min_y, max_x - min_x, max_y - min_y
 
     def paint(self, painter:QPainter):
         if self.points:
-            color = self.select_line_color if self.selected else self.line_color
+            color = self.select_line_color if self.selected else (self.line_color if self.fg else self.bg_fill_color)
 
             pen = QPen(color)
             # Try using integer sizes for smoother drawing(?)
             pen.setWidth(max(1, int(round(2.0 / self.scale))))
             painter.setPen(pen)
 
-            vrtx_path = QPainterPath()
+            if self.selected:
+                vrtx_path = QPainterPath()
+                for i, p in enumerate(self.points):
+                    self.drawVertex(vrtx_path, i)
+                painter.drawPath(vrtx_path)
+                painter.fillPath(vrtx_path, self.vertex_fill_color)
 
-            for i, p in enumerate(self.points):
-                self.drawVertex(vrtx_path, i)
-
-            painter.drawPath(vrtx_path)
-            painter.fillPath(vrtx_path, self.vertex_fill_color)
             if self.fill:
                 color = self.select_fill_color if self.selected else self.fill_color
                 brush = QBrush(color)
