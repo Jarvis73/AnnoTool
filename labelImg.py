@@ -46,7 +46,7 @@ from libs.yolo_io import YoloReader, TXT_EXT
 from libs.common_io import CommonReader, COMM_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem, HashableQTableWidgetItem
-from libs.image3d import read3d, Image3d, Item3d, DSKey, compute_robust_moments, write_nii
+from libs.image3d import read3d, Image3d, Item3d, DSKey, compute_robust_moments, write_nii, read_nii, computeDice
 
 
 __appname__ = 'labelImg'
@@ -213,12 +213,19 @@ class MainWindow(QMainWindow, WindowMixin):
         self.segShowLiverCheckBox.setVisible(True)
         self.segShowLiverCheckBox.setShortcut(QKeySequence(Qt.Key_L))
         self.segShowLiverCheckBox.stateChanged.connect(self.updateCanvasImage)
+        self.segComputeDiceCheckBox = QCheckBox()
+        self.segComputeDiceCheckBox.setChecked(False)
+        self.segComputeDiceCheckBox.setVisible(True)
+        self.segComputeDiceCheckBox.setShortcut(QKeySequence(Qt.Key_C))
+        self.segComputeDiceCheckBox.stateChanged.connect(self.computeDiceStateChanged)
+
         segAlgLayout = QHBoxLayout()
         segAlgLayout.addWidget(segAlgLabel)
         segAlgLayout.addWidget(self.segAlgComboBox)
         segAlgLayout.addWidget(self.segBgCheckBox)
         segAlgLayout.addWidget(self.segShowLiverCheckBox)
         segAlgLayout.addWidget(self.segShowCheckBox)
+        segAlgLayout.addWidget(self.segComputeDiceCheckBox)
         segAlgLayout.addItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
         self.segAlgContainer = QWidget()
         self.segAlgContainer.setLayout(segAlgLayout)
@@ -230,7 +237,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self.segAlgButtonRun.setEnabled(False)
         self.segAlgButtonClear = QPushButton(getStr("segAlgButtonClear"))
         self.segAlgButtonClear.clicked.connect(self.segClear)
-        self.segAlgButtonClear.setShortcut(QKeySequence(Qt.Key_C))
         self.segAlgButtonClear.setEnabled(False)
         self.segAlgButtonUndo = QPushButton(getStr("segAlgButtonUndo"))
         self.segAlgButtonUndo.clicked.connect(self.segUndo)
@@ -351,11 +357,12 @@ class MainWindow(QMainWindow, WindowMixin):
         }
         self.scrollArea = scroll
         self.canvas.scrollRequest.connect(self.scrollRequest)
-        
+
         self.canvas.newShape.connect(self.newShape)
         self.canvas.shapeMoved.connect(self.setDirty)
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
+        self.canvas.computeDiceRequest.connect(self.computeDice)
 
         self.setCentralWidget(scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.settingDock)
@@ -1940,17 +1947,20 @@ class MainWindow(QMainWindow, WindowMixin):
         elif segAlg in self.segAlg[1:3]:
             start = time.time()
             name = self.segName[self.segAlg.index(segAlg)]
-            centers, stddevs = [], []
+            centers = {"fg": [], "bg": []}
+            stddevs = {"fg": [], "bg": []}
             for key, shapes in self.canvas.shapes_3d.items():
                 for shape in shapes:
                     if shape.type_ == Shape.POINT:
-                        centers.append([DSKey.key2ds(key)[1], shape.points[0].y(), shape.points[0].x()])
-                        stddevs.append([3., 5., 5.])
+                        k = "fg" if shape.fg else "bg"
+                        centers[k].append([DSKey.key2ds(key)[1], shape.points[0].y(), shape.points[0].x()])
+                        stddevs[k].append([3., 5., 5.])
                     elif shape.type_ == Shape.ELLIPSE:
+                        k = "fg" if shape.fg else "bg"
                         x, y, w, h = shape.rect()
                         center, stddev = compute_robust_moments([int(x), int(y), int(w), int(h)], self.i3d.shape[1:])
-                        centers.append([DSKey.key2ds(key)[1]] + list(center))
-                        stddevs.append([3.] + list(stddev))
+                        centers[k].append([DSKey.key2ds(key)[1]] + list(center))
+                        stddevs[k].append([3.] + list(stddev))
             success = self.i3d.gnnu3d(name, centers, stddevs)
             diff = time.time() - start
             if success:
@@ -2064,6 +2074,24 @@ class MainWindow(QMainWindow, WindowMixin):
             value = self.segResSlider.value() / 100
             self.i3d.alpha = value
             self.updateCanvasImage()
+
+    def computeDice(self, y, x):
+        ref_file = os.path.join(os.path.dirname(self.filePath), os.path.basename(self.filePath).replace("volume", "segmentation"))
+        _, ref = read_nii(ref_file, out_dtype=np.uint8)
+        if ref.shape[0] == 21:
+            ref = ref[:20]
+        lab = self.i3d.segLabel if hasattr(self.i3d, "segLabel") else self.i3d.segCache
+        if isinstance(lab, np.ndarray) and lab.shape[0] == 21:
+            lab = lab[:20]
+        dice = computeDice(ref, lab, self.idx, int(y), int(x), True if hasattr(self.i3d, "segLabel") else False)
+        QMessageBox.information(self, "Info", "Dice of {}: {}".format(os.path.basename(self.filePath), dice),
+                                QMessageBox.Yes)
+
+    def computeDiceStateChanged(self):
+        if self.segComputeDiceCheckBox.isChecked():
+            self.canvas.overrideCursor(Qt.PointingHandCursor)
+        else:
+            self.canvas.overrideCursor(Qt.ArrowCursor)
 
 
 def inverted(color):

@@ -7,224 +7,267 @@ import qimage2ndarray as q2a
 import skimage.measure as measure
 import tensorflow as tf
 from tensorflow_serving.apis import predict_pb2, prediction_service_pb2_grpc
-import geodesic_distance as gd
+# import geodesic_distance as gd
 import matplotlib.pyplot as plt
+from scipy import ndimage as ndi
+from pathlib import Path
+import maxflow as mf
 
 
 class Image3d(object):
-	""" For 3D gray image """
+    """ For 3D gray image """
 
-	BK_DEFAULT, BK_FIRST, BK_SECOND = -1, -2, -3
+    BK_DEFAULT, BK_FIRST, BK_SECOND = -1, -2, -3
 
-	def __init__(self, volume, meta=None, filePath=None):
-		# self.raw = raw
-		# self.volume = raw.copy()
-		if volume is None and meta is None:
-			raise ValueError("Both `volume` and `meta` are None.")
-		self.volume = volume
-		self.filePath = filePath
-		self.meta = meta
-		if volume is not None:
-			self.shape = volume.shape
-			self.low = self.volume.min()
-			self.high = self.volume.max()
-		else:
-			self.shape = self.meta.shape
-			self.low = 0
-			self.high = 0
-		self.axis = 0		# 0, 1, 2
-		self.segCache = {}
-		self._alpha = 0.5
-		self._color = np.array([0, 255, 0])
-		self.contour = False
-		self.backup = None
-		self.backup_idx = Image3d.BK_DEFAULT
-		self.guide_temp = None
+    def __init__(self, volume, meta=None, filePath=None):
+        # self.raw = raw
+        # self.volume = raw.copy()
+        if volume is None and meta is None:
+            raise ValueError("Both `volume` and `meta` are None.")
+        self.volume = volume
+        self.filePath = filePath
+        self.meta = meta
+        if volume is not None:
+            self.shape = volume.shape
+            self.low = self.volume.min()
+            self.high = self.volume.max()
+        else:
+            self.shape = self.meta.shape
+            self.low = 0
+            self.high = 0
+        self.axis = 0		# 0, 1, 2
 
-	def __getitem__(self, i):
-		return self.volume[i]
+        self.segCache = {}
+        if filePath:
+            filePath = Path(filePath)
+            # segPath = filePath.parent.parent / "Lasso_nii" / filePath.name.replace("volume", "segmentation")
+            segPath = filePath.parent.parent / "temp" / filePath.name.replace("volume", "segmentation")
+            if segPath.exists():
+                _, self.segLabel = read_nii(segPath, out_dtype=np.uint8)
+                self.segCache = np.clip(self.segLabel, 0, 1)
 
-	@property
-	def color(self):
-		return self._color
+        self._alpha = 0.5
+        self._color = np.array([0, 255, 0])
+        self.contour = False
+        self.backup = None
+        self.backup_idx = Image3d.BK_DEFAULT
+        self.guide_temp = None
 
-	@color.setter
-	def color(self, color_):
-		self._color = np.array(color_)
+    def __getitem__(self, i):
+        return self.volume[i]
 
-	@property
-	def alpha(self):
-		return self._alpha
+    @property
+    def color(self):
+        return self._color
 
-	@alpha.setter
-	def alpha(self, alpha_):
-		self._alpha = max(min(alpha_, 1), 0)
+    @color.setter
+    def color(self, color_):
+        self._color = np.array(color_)
 
-	def astype(self, dtype):
-		self.volume = self.volume.astype(dtype)
+    @property
+    def alpha(self):
+        return self._alpha
 
-	def check(self, i, delta, axis=0):
-		if i - delta < 0:
-			return 0
-		if i - delta >= self.shape[axis]:
-			return self.shape[axis] - 1
-		return i - delta
+    @alpha.setter
+    def alpha(self, alpha_):
+        self._alpha = max(min(alpha_, 1), 0)
 
-	def setIntensityClip(self, low=None, high=None):
-		dirty = False
-		if low is not None and isinstance(low, (int, float)) and self.low != low:
-			self.low = low
-			dirty = True
-		if high is not None and isinstance(high, (int, float)) and self.high != high:
-			self.high = high
-			dirty = True
+    def astype(self, dtype):
+        self.volume = self.volume.astype(dtype)
 
-	def at(self, i, axis=0, show=True, showLabel2=True):
-		# We don't check index out of bounds
-		if axis == 0:
-			img = self.volume[i]
-		elif axis == 1:
-			img = self.volume[:, i]
-		elif axis == 2:
-			img = self.volume[:, :, i]
+    def check(self, i, delta, axis=0):
+        if i - delta < 0:
+            return 0
+        if i - delta >= self.shape[axis]:
+            return self.shape[axis] - 1
+        return i - delta
 
-		if not show or len(self.segCache) == 0 or (isinstance(self.segCache, dict) and i not in self.segCache):
-			return q2a.gray2qimage(img, normalize=(self.low, self.high))
-		else:
-			obj = self.segCache[i]
-			if self.segCache[i].max() > 1:
-				if showLabel2:
-					obj = np.clip(self.segCache[i], 0, 1)
-				else:
-					obj = np.clip(self.segCache[i] - 1, 0, 1)
-			img = np.repeat(img[..., None], 3, axis=2)
-			if not self.contour:
-				px = np.where(obj)
-				img[px[0], px[1]] = (1 - self._alpha) * img[px[0], px[1]] + self._alpha * self._color
-			else:
-				contours = measure.find_contours(obj, 0.5)
-				for cont in contours:
-					cont = cont.astype(np.int16)
-					img[cont[:, 0], cont[:, 1]] = self._color
-			return q2a.array2qimage(img, normalize=(self.low, self.high))
+    def setIntensityClip(self, low=None, high=None):
+        dirty = False
+        if low is not None and isinstance(low, (int, float)) and self.low != low:
+            self.low = low
+            dirty = True
+        if high is not None and isinstance(high, (int, float)) and self.high != high:
+            self.high = high
+            dirty = True
 
-	def pixel(self, slice_idx, i, j, axis=0):
-		if axis == 0:
-			return self.volume[slice_idx, i, j]
-		elif axis == 1:
-			return self.volume[i, slice_idx, j]
-		elif axis == 2:
-			return self.volume[i, j, slice_idx]
-		return 0
+    def at(self, i, axis=0, show=True, showLabel2=True):
+        # We don't check index out of bounds
+        if axis == 0:
+            img = self.volume[i]
+        elif axis == 1:
+            img = self.volume[:, i]
+        elif axis == 2:
+            img = self.volume[:, :, i]
 
-	def gunet(self, i, centers=None, stddevs=None, name=None):
-		if i == 0:
-			images = np.concatenate([np.zeros(self.shape[1:] + (1,)), self.volume[:2].transpose(1, 2, 0)], axis=-1)
-		elif i == self.shape[self.axis] - 1:
-			images = np.concatenate([self.volume[-2:].transpose(1, 2, 0), np.zeros(self.shape[1:] + (1,))], axis=-1)
-		else:
-			images = self.volume[i - 1:i + 2].transpose(1, 2, 0)
-		if name == "012_gnet_sp_f0":
-			output = gunet_liver_segmentation(images, centers, stddevs, 512, 512, name)
-		else:
-			output = gunet_segmentation(images, centers, stddevs, 960, 320)
-		if output is None:
-			return None, None
-		print(self.filePath, i, time)
+        if not show or len(self.segCache) == 0 or (isinstance(self.segCache, dict) and i not in self.segCache):
+            return q2a.gray2qimage(img, normalize=(self.low, self.high))
+        else:
+            obj = self.segCache[i]
+            if self.segCache[i].max() > 1:
+                if showLabel2:
+                    obj = np.clip(self.segCache[i], 0, 1)
+                else:
+                    obj = np.clip(self.segCache[i] - 1, 0, 1)
+            img = np.repeat(img[..., None], 3, axis=2)
+            if not self.contour:
+                px = np.where(obj)
+                img[px[0], px[1]] = (1 - self._alpha) * img[px[0], px[1]] + self._alpha * self._color
+            else:
+                contours = measure.find_contours(obj, 0.5)
+                for cont in contours:
+                    cont = cont.astype(np.int16)
+                    img[cont[:, 0], cont[:, 1]] = self._color
+            return q2a.array2qimage(img, normalize=(self.low, self.high))
 
-		if i in self.segCache:
-			self.backup = self.segCache[i]
-			self.backup_idx = i
-			self.segCache[i] = np.maximum(self.segCache[i], output)
-		else:
-			self.segCache[i] = output
-			self.backup_idx = i
-			self.backup = None
+    def pixel(self, slice_idx, i, j, axis=0):
+        if axis == 0:
+            return self.volume[slice_idx, i, j]
+        elif axis == 1:
+            return self.volume[i, slice_idx, j]
+        elif axis == 2:
+            return self.volume[i, j, slice_idx]
+        return 0
 
-		return True, time
+    def gunet(self, i, centers=None, stddevs=None, name=None):
+        if i == 0:
+            images = np.concatenate([np.zeros(self.shape[1:] + (1,)), self.volume[:2].transpose(1, 2, 0)], axis=-1)
+        elif i == self.shape[self.axis] - 1:
+            images = np.concatenate([self.volume[-2:].transpose(1, 2, 0), np.zeros(self.shape[1:] + (1,))], axis=-1)
+        else:
+            images = self.volume[i - 1:i + 2].transpose(1, 2, 0)
+        if name == "012_gnet_sp_f0":
+            output = gunet_liver_segmentation(images, centers, stddevs, 512, 512, name)
+        else:
+            if "NCI" in self.filePath:
+                height = self.shape[1] // 16 * 16
+                width = self.width[1] // 16 * 16
+                output = gunet_segmentation(images, centers, stddevs, height, width)
+            else:
+                output = gunet_segmentation(images, centers, stddevs, 960, 320)
+            # output = 1 / (1 + np.exp(-output[..., 1]) ** 0.8)
+            # output = graphcut(self.volume[i], output, sigma=80)
+        if output is None:
+            return None
+
+        if i in self.segCache:
+            self.backup = self.segCache[i]
+            self.backup_idx = i
+            self.segCache[i] = np.maximum(self.segCache[i], output)
+        else:
+            self.segCache[i] = output
+            self.backup_idx = i
+            self.backup = None
+
+        return True
 
 
-	def gnnu2d(self, name, i, centers=None, stddevs=None):
-		output, time = gnnu2d_segmentation(self.volume, i, centers, stddevs, 20, 1024, 320, self.guide_temp, name)
-		if output is None:
-			return None
+    def gnnu2d(self, name, i, centers=None, stddevs=None):
+        output, time = gnnu2d_segmentation(self.volume, i, centers, stddevs, 20, 1024, 320, self.guide_temp, name)
+        if output is None:
+            return None
 
-		if i in self.segCache:
-			self.backup = self.segCache[i]
-			self.backup_idx = i
-			self.segCache[i] = np.maximum(self.segCache[i], output)
-		else:
-			self.segCache[i] = output
-			self.backup_idx = i
-			self.backup = None
+        if i in self.segCache:
+            self.backup = self.segCache[i]
+            self.backup_idx = i
+            self.segCache[i] = np.maximum(self.segCache[i], output)
+        else:
+            self.segCache[i] = output
+            self.backup_idx = i
+            self.backup = None
 
-		return True
+        return True
 
-	def gnnu3d(self, name, centers=None, stddevs=None):
-		output = gnnu3d_segmentation(self.volume, centers, stddevs, 20, 512, 160, self.guide_temp, name)
-		if output is None:
-			return None
+    def gnnu3d(self, name, centers=None, stddevs=None):
+        volume = self.volume if self.shape[0] == 20 else self.volume[:20]   # make sure >= 20
+        output = gnnu3d_segmentation(volume, centers, stddevs, 20, 512, 160, self.guide_temp, name)
+        if output is None:
+            return None
 
-		if len(self.segCache) == 0:
-			self.segCache = output
-		else:
-			self.backup = self.segCache
-			self.segCache = np.maximum(self.segCache, output)
+        if len(self.segCache) == 0:
+            self.segCache = output
+        else:
+            self.backup = self.segCache
+            self.segCache = np.maximum(self.segCache, output)
 
-		return True
+        return True
 
-	def undo(self):
-		if self.backup_idx >= 0:
-			if self.backup is not None:
-				self.segCache[self.backup_idx] = self.backup
-				self.backup = None
-				self.backup_idx = Image3d.BK_DEFAULT
-			else:
-				self.segCache.pop(self.backup_idx)
-		elif self.backup_idx == Image3d.BK_FIRST:
-			self.segCache = {}
-			self.backup_idx = Image3d.BK_DEFAULT
-		elif self.backup_idx == Image3d.BK_SECOND:
-			self.segCache = self.backup
-			self.backup = None
-			self.backup_idx = Image3d.BK_DEFAULT
-		return self.backup_idx
+    def undo(self):
+        if self.backup_idx >= 0:
+            if self.backup is not None:
+                self.segCache[self.backup_idx] = self.backup
+                self.backup = None
+                self.backup_idx = Image3d.BK_DEFAULT
+            else:
+                self.segCache.pop(self.backup_idx)
+        elif self.backup_idx == Image3d.BK_FIRST:
+            self.segCache = {}
+            self.backup_idx = Image3d.BK_DEFAULT
+        elif self.backup_idx == Image3d.BK_SECOND:
+            self.segCache = self.backup
+            self.backup = None
+            self.backup_idx = Image3d.BK_DEFAULT
+        return self.backup_idx
 
 
 class Header(object):
-	def __init__(self, meta, format):
-		self.meta = meta
-		self.fmt = format
+    def __init__(self, meta, format):
+        self.meta = meta
+        self.fmt = format
 
-	@property
-	def shape(self):
-		if self.fmt in ["nii", "nii.gz"]:
-			return [int(x) for x in self.meta.get_data_shape()[::-1]]
+    @property
+    def shape(self):
+        if self.fmt in ["nii", "nii.gz"]:
+            return [int(x) for x in self.meta.get_data_shape()[::-1]]
 
 
 class DSKey(object):
-	""" (Direction, Slice) <-> Key """
+    """ (Direction, Slice) <-> Key """
 
-	@staticmethod
-	def ds2key(di, sl):
-		return di * 10000 + sl
-	
-	@staticmethod
-	def key2ds(key):
-		return key // 10000, key % 10000
+    @staticmethod
+    def ds2key(di, sl):
+        return di * 10000 + sl
+
+    @staticmethod
+    def key2ds(key):
+        return key // 10000, key % 10000
 
 
 class Item3d(object):
-	def __init__(self, label, axis, slice_):
-		self.label = label
-		self.axis = axis
-		self.slice = slice_
+    def __init__(self, label, axis, slice_):
+        self.label = label
+        self.axis = axis
+        self.slice = slice_
+
+
+def computeDice(ref, pred, z, y, x, segLabel=False):
+    if not (isinstance(ref, np.ndarray) and isinstance(pred, np.ndarray) and ref.shape == pred.shape):
+        return -1
+    disc = ndi.generate_binary_structure(3, connectivity=3)
+
+    # val = ref[z, y, x]
+    # ref_choose = ref == val
+
+    # if segLabel:
+    #     val = pred[z, y, x]
+    #     pred_choose = pred == val
+    # else:
+    #     labeled_pred, _ = ndi.label(pred, disc)
+    #     val = labeled_pred[z, y, x]
+    #     pred_choose = labeled_pred == val
+
+    ref_choose = np.clip(ref, 0, 1)
+    pred_choose = np.clip(pred, 0, 1)
+
+    v1 = np.count_nonzero(ref_choose * pred_choose)
+    v2 = np.count_nonzero(ref_choose) + np.count_nonzero(pred_choose)
+    return round(2 * v1 / (v2 + 1e-8), 4)
 
 
 def read3d(filePath, out_dtype=np.int16, only_header=False):
-	if filePath.lower().endswith(('.nii', '.nii.gz')):
-		hdr, volume = read_nii(filePath, out_dtype, only_header)
-		return Image3d(volume, Header(hdr, "nii"), filePath)
+    if filePath.lower().endswith(('.nii', '.nii.gz')):
+        hdr, volume = read_nii(filePath, out_dtype, only_header)
+        return Image3d(volume, Header(hdr, "nii"), filePath)
 
 
 def read_nii(file_name, out_dtype=np.int16, only_header=False):
@@ -304,126 +347,126 @@ def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij", keep
         reps=[centers.shape[0]] + [1] * (centers.shape[1] + 1))                 # [n, h, w, 2]
     coords = coords.astype(np.float32)
 
-    if geo is None:
-        if len(shape) == 2:
-            centers = centers[..., None, None, :]                                       # [n, 1, 1, 2]
-            stddevs = stddevs[..., None, None, :]                                       # [n, 1, 1, 2]
-        elif len(shape) == 3:
-            centers = centers[..., None, None, None, :]  # [n, 1, 1, 2]
-            stddevs = stddevs[..., None, None, None, :]  # [n, 1, 1, 2]
-        else:
-            raise ValueError()
-        normalizer = 2 * stddevs * stddevs                                          # [n, 1, 1, 2]
-        d = np.exp(-np.sum((coords - centers) **2 / normalizer, axis=-1, keepdims=keepdims))   # [n, h, w, 1] / [n, h, w]
-        guide = np.max(d, axis=0)
+    if len(shape) == 2:
+        centers = centers[..., None, None, :]                                       # [n, 1, 1, 2]
+        stddevs = stddevs[..., None, None, :]                                       # [n, 1, 1, 2]
+    elif len(shape) == 3:
+        centers = centers[..., None, None, None, :]  # [n, 1, 1, 2]
+        stddevs = stddevs[..., None, None, None, :]  # [n, 1, 1, 2]
     else:
-        S = np.zeros(shape, dtype=np.uint8)
-        for c in centers:
-            S[int(c[0]), int(c[1])] = 1
-        geo_dis = gd.geodesic2d_raster_scan(geo, S, 1.0, 2)
-        guide = np.exp(-geo_dis ** 2)
+        raise ValueError()
+    normalizer = 2 * stddevs * stddevs                                          # [n, 1, 1, 2]
+    d = np.exp(-np.sum((coords - centers) ** 2 / normalizer, axis=-1, keepdims=keepdims))   # [n, h, w, 1] / [n, h, w]
+    guide = np.max(d, axis=0)
     # plt.imshow(guide)
     # plt.show()
     return guide
 
 
 def gunet_segmentation(triple, centers, stddevs, height, width):
-	h, w, d = triple.shape
-	img_input = triple.astype(np.float32)
-	img_input = np.clip(img_input, 0, 900) / 900
+    h, w, d = triple.shape
+    img_input = triple.astype(np.float32)
+    img_input = np.clip(img_input, 0, 900) / 900
 
-	if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
-		guide = np.ones((h, w), dtype=np.float32) * 0.5
-	else:
-		if isinstance(centers, dict):
-			guide_fg = create_gaussian_distribution_v2((h, w), centers["fg"], stddevs["fg"]) \
-				if len(centers["fg"]) > 0 else 0
-			guide_bg = create_gaussian_distribution_v2((h, w), centers["bg"], stddevs["bg"]) \
-				if len(centers["bg"]) > 0 else 0
-			guide = 0.5 + (guide_fg - guide_bg) * 0.425
-		else:
-			guide = create_gaussian_distribution_v2((h, w), centers, stddevs)
-	inputs = np.concatenate((img_input, guide[..., None]), axis=-1)
-	inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR)
+    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
+        guide = np.ones((h, w), dtype=np.float32) * 0.5
+    else:
+        if isinstance(centers, dict):
+            guide_fg = create_gaussian_distribution_v2((h, w), centers["fg"], stddevs["fg"]) \
+                if len(centers["fg"]) > 0 else 0
+            guide_bg = create_gaussian_distribution_v2((h, w), centers["bg"], stddevs["bg"]) \
+                if len(centers["bg"]) > 0 else 0
+            guide = 0.5 + (guide_fg - guide_bg) * 0.425
+        else:
+            guide = create_gaussian_distribution_v2((h, w), centers, stddevs)
+    inputs = np.concatenate((img_input, guide[..., None]), axis=-1)
+    inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR)
 
-	host = "localhost"
-	port = 8500
-	channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
-	stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
+    host = "localhost"
+    port = 8500
+    channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
+    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
 
-	request = predict_pb2.PredictRequest()
-	request.model_spec.name = "112_nf_sp_dp"
-	request.model_spec.signature_name = "pred_images"
-	request.inputs['height'].CopyFrom(tf.make_tensor_proto(height))
-	request.inputs['width'].CopyFrom(tf.make_tensor_proto(width))
-	request.inputs['images_bytes'].CopyFrom(tf.make_tensor_proto(inputs[..., :3], shape=[1, height, width, 3]))
-	request.inputs['guide_bytes'].CopyFrom(tf.make_tensor_proto(inputs[..., 3:], shape=[1, height, width, 1]))
+    request = predict_pb2.PredictRequest()
+    request.model_spec.name = "112_nf_sp_dp"
+    request.model_spec.signature_name = "serving_default"
+    request.inputs['height'].CopyFrom(tf.make_tensor_proto(height))
+    request.inputs['width'].CopyFrom(tf.make_tensor_proto(width))
+    request.inputs['images'].CopyFrom(tf.make_tensor_proto(inputs[..., :3], shape=[1, height, width, 3]))
+    request.inputs['guide'].CopyFrom(tf.make_tensor_proto(inputs[..., 3:], shape=[1, height, width, 1]))
 
-	try:
-		result = stub.Predict(request)
-	except:
-		result = None
+    try:
+        result = stub.Predict(request)
+    except Exception as e:
+        print(e)
+        result = None
 
-	# Reference:
-	# How to access nested values
-	# https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
-	# logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
-	if result is not None:
-		output = np.array(result.outputs["output_bytes"].int64_val).reshape(height, width)
-		output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
-		return output
-	else:
-		return None
+    # Reference:
+    # How to access nested values
+    # https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
+    # logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
+    if result is not None:
+        output = np.array(result.outputs["out_pred"].int64_val).reshape(height, width)
+        output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
+        # prob = np.array(result.outputs["out_prob"].float_val).reshape(height, width)
+        # prob = ndi.zoom(prob, (h / prob.shape[0], w / prob.shape[1]), order=1)
+        # np.save(Path(__file__).parent.parent / "prob.npy", prob)
+        logit = np.array(result.outputs["out_logit"].float_val).reshape(height, width, 2)
+        logit = ndi.zoom(logit, (h / logit.shape[0], w / logit.shape[1], 1), order=1)
+        # np.save(Path(__file__).parent.parent / "logit.npy", logit)
+        return logit
+    else:
+        return None
 
 
 def gunet_liver_segmentation(triple, centers, stddevs, height, width, name):
-	h, w, d = triple.shape
-	img_input = triple.astype(np.float32)
-	img_input = (np.clip(img_input, -200, 250) + 200) / 450
+    h, w, d = triple.shape
+    img_input = triple.astype(np.float32)
+    img_input = (np.clip(img_input, -200, 250) + 200) / 450
 
-	if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
-		guide = np.ones((h, w), dtype=np.float32) * 0
-	else:
-		if isinstance(centers, dict):
-			guide_fg = create_gaussian_distribution_v2((h, w), centers["fg"], stddevs["fg"]) \
-				if len(centers["fg"]) > 0 else 0
-			guide_bg = create_gaussian_distribution_v2((h, w), centers["bg"], stddevs["bg"]) \
-				if len(centers["bg"]) > 0 else 0
-			guide = guide_fg - guide_bg
-		else:
-			guide = create_gaussian_distribution_v2((h, w), centers, stddevs) * 0.85
-	inputs = np.concatenate((img_input, guide[..., None]), axis=-1)
-	if height != inputs.shape[0] or width != inputs.shape[1]:
-		inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR)
+    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
+        guide = np.ones((h, w), dtype=np.float32) * 0
+    else:
+        if isinstance(centers, dict):
+            guide_fg = create_gaussian_distribution_v2((h, w), centers["fg"], stddevs["fg"]) \
+                if len(centers["fg"]) > 0 else 0
+            guide_bg = create_gaussian_distribution_v2((h, w), centers["bg"], stddevs["bg"]) \
+                if len(centers["bg"]) > 0 else 0
+            guide = guide_fg - guide_bg
+        else:
+            guide = create_gaussian_distribution_v2((h, w), centers, stddevs) * 0.85
+    inputs = np.concatenate((img_input, guide[..., None]), axis=-1)
+    if height != inputs.shape[0] or width != inputs.shape[1]:
+        inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR)
 
-	host = "localhost"
-	port = 8500
-	channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
-	stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
+    host = "localhost"
+    port = 8500
+    channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
+    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
 
-	request = predict_pb2.PredictRequest()
-	request.model_spec.name = name
-	request.model_spec.signature_name = "serving_default"
-	request.inputs['height'].CopyFrom(tf.make_tensor_proto(height))
-	request.inputs['width'].CopyFrom(tf.make_tensor_proto(width))
-	request.inputs['images_bytes'].CopyFrom(tf.make_tensor_proto(inputs[..., :3], shape=[1, height, width, 3]))
-	request.inputs['guide_bytes'].CopyFrom(tf.make_tensor_proto(inputs[..., 3:], shape=[1, height, width, 1]))
+    request = predict_pb2.PredictRequest()
+    request.model_spec.name = name
+    request.model_spec.signature_name = "serving_default"
+    request.inputs['height'].CopyFrom(tf.make_tensor_proto(height))
+    request.inputs['width'].CopyFrom(tf.make_tensor_proto(width))
+    request.inputs['images_bytes'].CopyFrom(tf.make_tensor_proto(inputs[..., :3], shape=[1, height, width, 3]))
+    request.inputs['guide_bytes'].CopyFrom(tf.make_tensor_proto(inputs[..., 3:], shape=[1, height, width, 1]))
 
-	try:
-		result = stub.Predict(request)
-	except:
-		result = None
+    try:
+        result = stub.Predict(request)
+    except:
+        result = None
 
-	# Reference:
-	# How to access nested values
-	# https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
-	# logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
-	if result is not None:
-		output = np.array(result.outputs["output_bytes"].int64_val).reshape(height, width)
-		output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
-		return output
-	else:
-		return None
+    # Reference:
+    # How to access nested values
+    # https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
+    # logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
+    if result is not None:
+        output = np.array(result.outputs["output_bytes"].int64_val).reshape(height, width)
+        output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
+        return output
+    else:
+        return None
 
 
 def gnnu3d_segmentation(image, centers, stddevs, depth, height, width, guide_temp, name):
@@ -432,10 +475,18 @@ def gnnu3d_segmentation(image, centers, stddevs, depth, height, width, guide_tem
     #preprocessing...
     img_input = (img_input - img_input.mean()) / (img_input.std() + 1e-8)
 
-    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
+    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0 or \
+            (isinstance(centers, dict) and len(centers["fg"]) == 0):
         guide = np.zeros((d, h, w), dtype=np.float32)
     else:
-        guide = create_gaussian_distribution_v2((d, h, w), centers, stddevs)
+        if isinstance(centers, dict):
+            guide_fg = create_gaussian_distribution_v2((d, h, w), centers["fg"], stddevs["fg"]) \
+                if len(centers["fg"]) > 0 else 0
+            guide_bg = create_gaussian_distribution_v2((d, h, w), centers["bg"], stddevs["bg"]) \
+                if len(centers["bg"]) > 0 else 0
+            guide = guide_fg - guide_bg
+        else:
+            guide = create_gaussian_distribution_v2((d, h, w), centers, stddevs)
     inputs = np.concatenate((img_input[None], guide[None]), axis=0)
     inputs = inputs.reshape((-1, h, w))
     inputs = inputs.transpose((1, 2, 0))
@@ -479,9 +530,9 @@ def gnnu2d_segmentation(image, idx, centers, stddevs, depth, height, width, guid
     img_input = (img_input - img_input.mean()) / (img_input.std() + 1e-8)
 
     if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
-	    guide = np.ones((h, w), dtype=np.float32)
+        guide = np.ones((h, w), dtype=np.float32)
     else:
-	    guide = create_gaussian_distribution_v2((h, w), centers, stddevs) * 0.85
+        guide = create_gaussian_distribution_v2((h, w), centers, stddevs) * 0.85
     inputs = np.concatenate((img_input, guide[None]), axis=0).transpose((1, 2, 0))
     inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR).transpose((2, 0, 1))
 
@@ -496,32 +547,32 @@ def gnnu2d_segmentation(image, idx, centers, stddevs, depth, height, width, guid
     request.inputs['in'].CopyFrom(tf.make_tensor_proto(inputs[None], shape=[1, 2, height, width]))
 
     try:
-	    result = stub.Predict(request)
+        result = stub.Predict(request)
     except Exception as e:
-	    print(e)
-	    result = None
+        print(e)
+        result = None
 
     # Reference:
     # How to access nested values
     # https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
     # logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
     if result is not None:
-	    output = np.array(result.outputs["out"].int64_val).reshape(height, width)
-	    output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
-	    return output
+        output = np.array(result.outputs["out"].int64_val).reshape(height, width)
+        output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
+        return output
     else:
-	    return None
+        return None
 
 
 def createEllipse(rect, shape):
-	x, y, w, h = rect
-	cy, cx = h // 2, w // 2
-	xrng = np.arange(w)
-	yrng = np.arange(h)
-	coord = np.stack(np.meshgrid(yrng, xrng, indexing="ij"), axis=-1)
-	ellipse_mask = np.zeros(shape, dtype=np.uint8)
-	ellipse_mask[y:y + h, x:x + w] = np.sum(((coord - [cy, cx]) / [cy, cx]) ** 2, axis=-1) <= 1
-	return ellipse_mask
+    x, y, w, h = rect
+    cy, cx = h // 2, w // 2
+    xrng = np.arange(w)
+    yrng = np.arange(h)
+    coord = np.stack(np.meshgrid(yrng, xrng, indexing="ij"), axis=-1)
+    ellipse_mask = np.zeros(shape, dtype=np.uint8)
+    ellipse_mask[y:y + h, x:x + w] = np.sum(((coord - [cy, cx]) / [cy, cx]) ** 2, axis=-1) <= 1
+    return ellipse_mask
 
 
 def compute_robust_moments(rect, shape, isotropic=False, indexing="ij", min_std=0.):
@@ -581,14 +632,46 @@ def compute_robust_moments(rect, shape, isotropic=False, indexing="ij", min_std=
         raise ValueError("Valid values for `indexing` are 'xy' and 'ij'.")
 
 
+def graphcut(img, probability_map, sigma=1):
+    p = probability_map
+    g = mf.Graph[float]()
+    ids = g.add_grid_nodes(p.shape)
+    g.add_grid_tedges(ids, -np.log(p) * 0.2, -np.log(1 - p) * 0.2)
+
+    # add weights for edges
+    struct1 = np.array([[0, 1, 0],
+                        [0, 0, 0],
+                        [0, 1, 0]])
+    struct2 = np.array([[0, 0, 0],
+                        [1, 0, 1],
+                        [0, 0, 0]])
+    # struct3 = np.array([[1, 0, 0],
+    #                     [0, 0, 0],
+    #                     [0, 0, 1]])
+    # struct4 = np.array([[0, 0, 1],
+    #                     [0, 0, 0],
+    #                     [1, 0, 0]])
+    w1 = np.exp(-(img[1:] - img[:-1]) ** 2 / (2 * sigma ** 2))
+    g.add_grid_edges(ids, np.pad(w1, ((0, 1), (0, 0))), struct1, symmetric=1)
+    w2 = np.exp(-(img[:, 1:] - img[:, :-1]) ** 2 / (2 * sigma ** 2))
+    g.add_grid_edges(ids, np.pad(w2, ((0, 0), (0, 1))), struct2, symmetric=1)
+    # w3 = np.exp(-(img[1:, 1:] - img[:-1, :-1]) ** 2 / (2 * sigma ** 2)) / np.sqrt(2)
+    # g.add_grid_edges(ids, np.pad(w3, ((0, 1), (0, 1))), struct2, symmetric=1)
+    # w3 = np.exp(-(img[1:, :-1] - img[:-1, 1:]) ** 2 / (2 * sigma ** 2)) / np.sqrt(2)
+    # g.add_grid_edges(ids, np.pad(w3, ((0, 1), (1, 0))), struct2, symmetric=1)
+    g.maxflow()
+    sgm = g.get_grid_segments(ids)
+    return sgm
+
+
 if __name__ == "__main__":
-	rect = 250, 250, 50, 100
-	shape = 512, 512
-	mask0 = createEllipse(rect, shape)
-	center, stddev = compute_robust_moments(rect, shape)
-	mask = create_gaussian_distribution_v2(shape, [center], [stddev])
-	plt.subplot(121)
-	plt.imshow(mask0)
-	plt.subplot(122)
-	plt.imshow(mask)
-	plt.show()
+    rect = 250, 250, 50, 100
+    shape = 512, 512
+    mask0 = createEllipse(rect, shape)
+    center, stddev = compute_robust_moments(rect, shape)
+    mask = create_gaussian_distribution_v2(shape, [center], [stddev])
+    plt.subplot(121)
+    plt.imshow(mask0)
+    plt.subplot(122)
+    plt.imshow(mask)
+    plt.show()

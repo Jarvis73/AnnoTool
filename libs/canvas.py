@@ -9,6 +9,7 @@ except ImportError:
 
 #from PyQt4.QtOpenGL import *
 
+import time
 from libs.shape import Shape, Point, Ellipse
 from libs.utils import distance
 from libs.image3d import DSKey
@@ -28,10 +29,13 @@ class Canvas(QWidget):
     shapeMoved = pyqtSignal()
     drawingPolygon = pyqtSignal(bool)
     sliceChangeRequest = pyqtSignal(int)    # for 3d image
+    computeDiceRequest = pyqtSignal(int, int)
 
     CREATE, EDIT = list(range(2))
 
     epsilon = 3.0
+    dblclick = None
+    start = 0
 
     def __init__(self, *args, **kwargs):
         super(Canvas, self).__init__(*args, **kwargs)
@@ -244,10 +248,13 @@ class Canvas(QWidget):
                 self.hShape.highlightClear()
                 self.update()
             self.hVertex, self.hShape, self.hPoint = None, None, None
-            self.overrideCursor(CURSOR_DEFAULT)
+            if not self.parent().window().segComputeDiceCheckBox.isChecked():
+                self.overrideCursor(CURSOR_DEFAULT)
 
     def mousePressEvent(self, ev):
         pos = self.transformPos(ev.pos())
+        if self.parent().window().segComputeDiceCheckBox.isChecked():
+            self.mouseDoubleClick(ev)
 
         if ev.button() == Qt.LeftButton:
             if self.drawing():
@@ -265,6 +272,7 @@ class Canvas(QWidget):
             self.selectShapePoint(pos)
             self.prevPoint = pos
             self.repaint()
+
 
     def mouseReleaseEvent(self, ev):
         if ev.button() == Qt.RightButton:
@@ -289,6 +297,12 @@ class Canvas(QWidget):
                     self.handleDrawingPoint(pos)
                 else:
                     raise NotImplementedError
+
+    def mouseDoubleClick(self, ev):
+        pos = self.transformPos(ev.pos())
+        if ev.button() == Qt.LeftButton:
+            self.computeDiceRequest.emit(pos.y(), pos.x())
+        self.start = 0
 
     def endMove(self, copy=False):
         assert self.selectedShape and self.selectedShapeCopy
