@@ -1,17 +1,17 @@
 import cv2
 import grpc
-import time
 import numpy as np
 import nibabel as nib
 import qimage2ndarray as q2a
 import skimage.measure as measure
+from skimage import feature
+from skimage._shared import utils as skutils
 import tensorflow as tf
 from tensorflow_serving.apis import predict_pb2, prediction_service_pb2_grpc
-# import geodesic_distance as gd
 import matplotlib.pyplot as plt
 from scipy import ndimage as ndi
 from pathlib import Path
-import maxflow as mf
+from collections import OrderedDict
 
 
 class Image3d(object):
@@ -138,13 +138,16 @@ class Image3d(object):
             images = self.volume[i - 1:i + 2].transpose(1, 2, 0)
         if name == "012_gnet_sp_f0":
             output = gunet_liver_segmentation(images, centers, stddevs, 512, 512, name)
+        elif name == "115_nf_both1_v2":
+            output = gunet_segmentation_spct(images, centers, stddevs, 768, 256, name)
         else:
             if "NCI" in self.filePath:
                 height = self.shape[1] // 16 * 16
-                width = self.width[1] // 16 * 16
-                output = gunet_segmentation(images, centers, stddevs, height, width)
+                width = self.shape[2] // 16 * 16
+                output = gunet_segmentation(images, centers, stddevs, height, width, name)
             else:
-                output = gunet_segmentation(images, centers, stddevs, 960, 320)
+                print(name)
+                output = gunet_segmentation(images, centers, stddevs, 960, 320, name)
             # output = 1 / (1 + np.exp(-output[..., 1]) ** 0.8)
             # output = graphcut(self.volume[i], output, sigma=80)
         if output is None:
@@ -153,7 +156,8 @@ class Image3d(object):
         if i in self.segCache:
             self.backup = self.segCache[i]
             self.backup_idx = i
-            self.segCache[i] = np.maximum(self.segCache[i], output)
+            # self.segCache[i] = np.maximum(self.segCache[i], output)
+            self.segCache[i] = output
         else:
             self.segCache[i] = output
             self.backup_idx = i
@@ -188,7 +192,8 @@ class Image3d(object):
             self.segCache = output
         else:
             self.backup = self.segCache
-            self.segCache = np.maximum(self.segCache, output)
+            # self.segCache = np.maximum(self.segCache, output)
+            self.segCache = output
 
         return True
 
@@ -242,22 +247,23 @@ class Item3d(object):
 
 def computeDice(ref, pred, z, y, x, segLabel=False):
     if not (isinstance(ref, np.ndarray) and isinstance(pred, np.ndarray) and ref.shape == pred.shape):
+        print(ref.shape, pred.shape)
         return -1
     disc = ndi.generate_binary_structure(3, connectivity=3)
 
-    # val = ref[z, y, x]
-    # ref_choose = ref == val
+    val = ref[z, y, x]
+    ref_choose = ref == val
 
-    # if segLabel:
-    #     val = pred[z, y, x]
-    #     pred_choose = pred == val
-    # else:
-    #     labeled_pred, _ = ndi.label(pred, disc)
-    #     val = labeled_pred[z, y, x]
-    #     pred_choose = labeled_pred == val
+    if segLabel:
+        val = pred[z, y, x]
+        pred_choose = pred == val
+    else:
+        labeled_pred, _ = ndi.label(pred, disc)
+        val = labeled_pred[z, y, x]
+        pred_choose = labeled_pred == val
 
-    ref_choose = np.clip(ref, 0, 1)
-    pred_choose = np.clip(pred, 0, 1)
+    # ref_choose = np.clip(ref, 0, 1)
+    # pred_choose = np.clip(pred, 0, 1)
 
     v1 = np.count_nonzero(ref_choose * pred_choose)
     v2 = np.count_nonzero(ref_choose) + np.count_nonzero(pred_choose)
@@ -363,7 +369,7 @@ def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij", keep
     return guide
 
 
-def gunet_segmentation(triple, centers, stddevs, height, width):
+def gunet_segmentation(triple, centers, stddevs, height, width, name):
     h, w, d = triple.shape
     img_input = triple.astype(np.float32)
     img_input = np.clip(img_input, 0, 900) / 900
@@ -388,7 +394,7 @@ def gunet_segmentation(triple, centers, stddevs, height, width):
     stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
 
     request = predict_pb2.PredictRequest()
-    request.model_spec.name = "112_nf_sp_dp"
+    request.model_spec.name = name
     request.model_spec.signature_name = "serving_default"
     request.inputs['height'].CopyFrom(tf.make_tensor_proto(height))
     request.inputs['width'].CopyFrom(tf.make_tensor_proto(width))
@@ -411,10 +417,87 @@ def gunet_segmentation(triple, centers, stddevs, height, width):
         # prob = np.array(result.outputs["out_prob"].float_val).reshape(height, width)
         # prob = ndi.zoom(prob, (h / prob.shape[0], w / prob.shape[1]), order=1)
         # np.save(Path(__file__).parent.parent / "prob.npy", prob)
-        logit = np.array(result.outputs["out_logit"].float_val).reshape(height, width, 2)
-        logit = ndi.zoom(logit, (h / logit.shape[0], w / logit.shape[1], 1), order=1)
+        # logit = np.array(result.outputs["out_logit"].float_val).reshape(height, width, 2)
+        # logit = ndi.zoom(logit, (h / logit.shape[0], w / logit.shape[1], 1), order=1)
         # np.save(Path(__file__).parent.parent / "logit.npy", logit)
-        return logit
+        return output
+    else:
+        return None
+
+
+def gunet_segmentation_spct(triple, centers, stddevs, height, width, name):
+    h, w, d = triple.shape
+    img_input = triple.astype(np.float32)
+    img_input = np.clip(img_input, 0, 900) / 900
+
+    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
+        guide = np.ones((h, w), dtype=np.float32) * 0.5
+    else:
+        if isinstance(centers, dict):
+            guide_fg = create_gaussian_distribution_v2((h, w), centers["fg"], stddevs["fg"]) \
+                if len(centers["fg"]) > 0 else 0
+            guide_bg = create_gaussian_distribution_v2((h, w), centers["bg"], stddevs["bg"]) \
+                if len(centers["bg"]) > 0 else 0
+            guide = 0.5 + (guide_fg - guide_bg) * 0.425
+        else:
+            guide = create_gaussian_distribution_v2((h, w), centers, stddevs)
+    inputs = np.concatenate((img_input, guide[..., None]), axis=-1)
+    inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR)
+    # compute GLCM
+    feat_list = ["contrast", "dissimilarity", "homogeneity", "energy", "entropy", "correlation",
+                 "cluster_shade", "cluster_prominence"]
+    distances = (1, 2, 3)
+    angles = (0, 1, 2, 3)
+    glcm_feature_length = len(distances) * len(angles) * len(feat_list)
+    norm_img = (img_input[:, :, 1] * 255).astype(np.uint8)
+    angle = np.pi / 4
+
+    features = np.zeros((glcm_feature_length,), dtype=np.float32)
+    glcm_counter = 0
+
+    for (y, x), (b, a) in (zip(centers, stddevs) if not isinstance(centers, dict) else zip(centers["fg"], stddevs["fg"])):
+        a = max(16, int(a / 1.4826 * 2.2))
+        b = max(16, int(b / 1.4826 * 2.2))
+        x1 = min(norm_img.shape[1] - 2 * a, max(0, int(x) - a))
+        y1 = min(norm_img.shape[0] - 2 * b, max(0, int(x) - b))
+        x2 = x1 + a * 2
+        y2 = y1 + b * 2
+        image_patch = norm_img[y1:y2, x1:x2]
+        import matplotlib.pyplot as plt
+        plt.imshow(image_patch, cmap="gray")
+        plt.savefig("aa.png")
+        image_patch = ndi.gaussian_filter(image_patch, 0.5)
+        _, ff = glcm_features(image_patch, distances, [angle * x for x in angles],
+                              256, True, True, feat_list,
+                              flat=True, norm_levels=True)
+        features += np.array([ff[fe] for fe in feat_list]).reshape(-1)
+        glcm_counter += 1
+    context = features / glcm_counter
+
+    host = "localhost"
+    port = 8500
+    channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
+    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
+
+    request = predict_pb2.PredictRequest()
+    request.model_spec.name = name
+    request.model_spec.signature_name = "serving_default"
+    request.inputs['height'].CopyFrom(tf.make_tensor_proto(height))
+    request.inputs['width'].CopyFrom(tf.make_tensor_proto(width))
+    request.inputs['images'].CopyFrom(tf.make_tensor_proto(inputs[..., :3], shape=[1, height, width, 3]))
+    request.inputs['guide'].CopyFrom(tf.make_tensor_proto(inputs[..., 3:], shape=[1, height, width, 1]))
+    request.inputs['context'].CopyFrom(tf.make_tensor_proto(context[None], shape=[1, glcm_feature_length]))
+
+    try:
+        result = stub.Predict(request)
+    except Exception as e:
+        print(e)
+        result = None
+
+    if result is not None:
+        output = np.array(result.outputs["out_pred"].int64_val).reshape(height, width)
+        output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
+        return output
     else:
         return None
 
@@ -506,7 +589,8 @@ def gnnu3d_segmentation(image, centers, stddevs, depth, height, width, guide_tem
 
     try:
         result = stub.Predict(request)
-    except:
+    except Exception as e:
+        print(e)
         result = None
 
     # Reference:
@@ -662,6 +746,101 @@ def graphcut(img, probability_map, sigma=1):
     g.maxflow()
     sgm = g.get_grid_segments(ids)
     return sgm
+
+
+def greycoprops(P, props=('contrast', )):
+    """ Extended version of skimage.feature.greycoprops() for supporting more features.
+    """
+    skutils.assert_nD(P, 4, 'P')
+
+    (num_level, num_level2, num_dist, num_angle) = P.shape
+    assert num_level == num_level2
+    assert num_dist > 0
+    assert num_angle > 0
+    results = OrderedDict()
+
+    # create weights for specified property
+    I, J = np.ogrid[0:num_level, 0:num_level]
+    if 'asm' in props or "energy" in props:
+        asm = np.sum(P ** 2, axis=(0, 1))
+        if "asm" in props:
+            results["asm"] = asm
+        if "energy" in props:
+            results["energy"] = np.sqrt(asm)
+    if 'contrast' in props:
+        weights = (I - J) ** 2
+        results["contrast"] = np.sum(P * weights[:, :, None, None], axis=(0, 1))
+    if 'dissimilarity' in props:
+        weights = np.abs(I - J)
+        results["dissimilarity"] = np.sum(P * weights[:, :, None, None], axis=(0, 1))
+    if "entropy" in props:
+        results["entropy"] = -np.apply_over_axes(np.sum, (P * np.log(P + 1e-16)), axes=(0, 1))[0, 0]
+    if 'homogeneity' in props:
+        weights = 1. / (1. + (I - J) ** 2)
+        results["homogeneity"] = np.sum(P * weights[:, :, None, None], axis=(0, 1))
+    if "correlation" in props or "cluster_shade" in props or "cluster_prominence" in props:
+        I = np.array(range(num_level)).reshape((num_level, 1, 1, 1))
+        J = np.array(range(num_level)).reshape((1, num_level, 1, 1))
+        mean_i = np.sum(I * P, axis=(0, 1))
+        mean_j = np.sum(J * P, axis=(0, 1))
+        diff_i = I - mean_i
+        diff_j = J - mean_j
+        if "correlation" in props:
+            std_i = np.sqrt(np.sum(P * (diff_i) ** 2, axis=(0, 1)))
+            std_j = np.sqrt(np.sum(P * (diff_j) ** 2, axis=(0, 1)))
+            cov = np.sum(P * (diff_i * diff_j), axis=(0, 1))
+            results["correlation"] = np.zeros((num_dist, num_angle), dtype=np.float64)
+            # handle the special case of standard deviations near zero
+            mask_0 = std_i < 1e-15
+            mask_0[std_j < 1e-15] = True
+            results["correlation"][mask_0] = 1
+            # handle the standard case
+            mask_1 = mask_0 == False
+            results["correlation"][mask_1] = cov[mask_1] / (std_i[mask_1] * std_j[mask_1])
+        if "cluster_shade" in props:
+            weights = (diff_i + diff_j) ** 3
+            results["cluster_shade"] = np.sum(P * weights, axis=(0, 1))
+        if "cluster_prominence" in props:
+            weights = (diff_i + diff_j) ** 4
+            results["cluster_prominence"] = np.sum(P * weights, axis=(0, 1))
+
+    return results
+
+
+def glcm_features(image, distances, angles, levels=256,
+                  symmetric=True, normed=True, features=None, flat=False, norm_levels=False):
+    glcm = feature.greycomatrix(
+        image, distances=distances, angles=angles, levels=levels, symmetric=symmetric, normed=normed)
+    if features is None:
+        return glcm
+
+    supported_features = ["contrast", "dissimilarity", "homogeneity", "asm", "energy", "correlation",
+                          "entropy", "cluster_shade", "cluster_prominence"]
+    for feat in features:
+        if feat not in supported_features:
+            raise ValueError("%s is an invalid property" % feat)
+    results = greycoprops(glcm, props=features)
+    if flat:
+        results = {k: v.reshape(-1) for k, v in results.items()}
+    if norm_levels:
+        if "dissimilarity" in results:
+            results["dissimilarity"] /= levels / 2 / 2
+        if "contrast" in results:
+            results["contrast"] /= (levels / 4) ** 2
+        if "cluster_shade" in results:
+            results["cluster_shade"] /= (levels / 4) ** 3
+        if "cluster_prominence" in results:
+            results["cluster_prominence"] /= (levels / 4) ** 4
+        if "homogeneity" in results:
+            results["homogeneity"] *= 2
+        if "asm" in results:
+            results["asm"] *= 2
+        if "energy" in results:
+            results["energy"] *= 2
+        if "entropy" in results:
+            results["entropy"] /= 8
+
+    return glcm, results
 
 
 if __name__ == "__main__":

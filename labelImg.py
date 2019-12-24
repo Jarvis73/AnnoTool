@@ -191,12 +191,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.segResContainer2.setLayout(segResLayout2)
         i3dSettingLayout.addWidget(self.segResContainer2)
 
-        # segmentation algorithm
+        # segmentation algorithmDann
         segAlgLabel = QLabel(getStr("segAlgLabel"))
-        self.segAlg = ["G-UNet SP NF", "Gnnu 3D NF Semi", "Gnnu 3D NF Both", "Gnnu 2D NF Both", "Gnnu 2D NF Semi",
-                       "G-UNet SP Liver"]
-        self.segName = ["112_nf_sp_dp", "nf_semi_3d", "nf_both_3d", "nf_both_2d", "nf_semi_2d",
-                        "012_gnet_sp_f0"]
+        self.segAlg = ["G-UNet NF SP", "Gnnu 3D NF Semi", "Gnnu 3D NF Both", "Gnnu 2D NF Both", "Gnnu 2D NF Semi",
+                       "G-UNet Liver SP", "Gnnu 3D NF wo Norm", "G-UNet NF SPCT"]
+        self.segName = ["112_nf_sp_fix", "nf_semi_3d", "nf_both_3d", "nf_both_2d", "nf_semi_2d",
+                        "012_gnet_sp_f0", "nf_3d_wo_norm", "115_nf_both1_v2"]
         self.segAlgComboBox = QComboBox()
         self.segAlgComboBox.addItems(self.segAlg)
         self.segBgCheckBox = QCheckBox("Background: ")
@@ -1916,7 +1916,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def segRun(self):
         segAlg = self.segAlgComboBox.currentText()
-        if self.i3d is not None and segAlg in [self.segAlg[0], self.segAlg[5]]:
+        if self.i3d is not None and segAlg in [self.segAlg[0], self.segAlg[5], self.segAlg[7]]:
             start = time.time()
             name = self.segName[self.segAlg.index(segAlg)]
             centers = {"fg": [], "bg": []}
@@ -1925,7 +1925,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 if shape.type_ == Shape.POINT:
                     key = "fg" if shape.fg else "bg"
                     centers[key].append([shape.points[0].y(), shape.points[0].x()])
-                    stddevs[key].append([3., 3.] if shape.fg else [3., 3.])
+                    stddevs[key].append([5., 5.] if shape.fg else [5., 5.])
                 elif shape.type_ == Shape.ELLIPSE:
                     key = "fg" if shape.fg else "bg"
                     x, y, w, h = shape.rect()
@@ -1944,7 +1944,7 @@ class MainWindow(QMainWindow, WindowMixin):
             elif success is None:
                 QMessageBox.critical(self, "Error", "Please select correct segmentation method.",
                                      QMessageBox.Yes)
-        elif segAlg in self.segAlg[1:3]:
+        elif segAlg in self.segAlg[1:3] + self.segAlg[6:7]:
             start = time.time()
             name = self.segName[self.segAlg.index(segAlg)]
             centers = {"fg": [], "bg": []}
