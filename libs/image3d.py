@@ -6,18 +6,17 @@ import qimage2ndarray as q2a
 import skimage.measure as measure
 from skimage import feature
 from skimage._shared import utils as skutils
-import tensorflow as tf
-from tensorflow_serving.apis import predict_pb2, prediction_service_pb2_grpc
+# import tensorflow as tf
+# from tensorflow_serving.apis import predict_pb2, prediction_service_pb2_grpc
 import matplotlib.pyplot as plt
 from scipy import ndimage as ndi
 from pathlib import Path
 from collections import OrderedDict
+from libs.graph_cut import GraphCut3D
 
 
 class Image3d(object):
     """ For 3D gray image """
-
-    BK_DEFAULT, BK_FIRST, BK_SECOND = -1, -2, -3
 
     def __init__(self, volume, meta=None, filePath=None):
         # self.raw = raw
@@ -38,19 +37,18 @@ class Image3d(object):
         self.axis = 0		# 0, 1, 2
 
         self.segCache = {}
-        if filePath:
-            filePath = Path(filePath)
-            # segPath = filePath.parent.parent / "Lasso_nii" / filePath.name.replace("volume", "segmentation")
-            segPath = filePath.parent.parent / "temp" / filePath.name.replace("volume", "segmentation")
-            if segPath.exists():
-                _, self.segLabel = read_nii(segPath, out_dtype=np.uint8)
-                self.segCache = np.clip(self.segLabel, 0, 1)
+        # if filePath:
+        #     filePath = Path(filePath)
+        #     # segPath = filePath.parent.parent / "Lasso_nii" / filePath.name.replace("volume", "segmentation")
+        #     segPath = filePath.parent.parent / "temp" / filePath.name.replace("volume", "segmentation")
+        #     if segPath.exists():
+        #         _, self.segLabel = read_nii(segPath, out_dtype=np.uint8)
+        #         self.segCache = np.clip(self.segLabel, 0, 1)
 
         self._alpha = 0.5
         self._color = np.array([0, 255, 0])
         self.contour = False
         self.backup = None
-        self.backup_idx = Image3d.BK_DEFAULT
         self.guide_temp = None
 
     def __getitem__(self, i):
@@ -83,15 +81,12 @@ class Image3d(object):
         return i - delta
 
     def setIntensityClip(self, low=None, high=None):
-        dirty = False
         if low is not None and isinstance(low, (int, float)) and self.low != low:
             self.low = low
-            dirty = True
         if high is not None and isinstance(high, (int, float)) and self.high != high:
             self.high = high
-            dirty = True
 
-    def at(self, i, axis=0, show=True, showLabel2=True):
+    def at(self, i, axis=0, show=True):
         # We don't check index out of bounds
         if axis == 0:
             img = self.volume[i]
@@ -105,10 +100,7 @@ class Image3d(object):
         else:
             obj = self.segCache[i]
             if self.segCache[i].max() > 1:
-                if showLabel2:
-                    obj = np.clip(self.segCache[i], 0, 1)
-                else:
-                    obj = np.clip(self.segCache[i] - 1, 0, 1)
+                obj = np.clip(self.segCache[i], 0, 1)
             img = np.repeat(img[..., None], 3, axis=2)
             if not self.contour:
                 px = np.where(obj)
@@ -129,90 +121,37 @@ class Image3d(object):
             return self.volume[i, j, slice_idx]
         return 0
 
-    def gunet(self, i, centers=None, stddevs=None, name=None):
-        if i == 0:
-            images = np.concatenate([np.zeros(self.shape[1:] + (1,)), self.volume[:2].transpose(1, 2, 0)], axis=-1)
-        elif i == self.shape[self.axis] - 1:
-            images = np.concatenate([self.volume[-2:].transpose(1, 2, 0), np.zeros(self.shape[1:] + (1,))], axis=-1)
-        else:
-            images = self.volume[i - 1:i + 2].transpose(1, 2, 0)
-        if name == "012_gnet_sp_f0":
-            output = gunet_liver_segmentation(images, centers, stddevs, 512, 512, name)
-        elif name == "115_nf_both1_v2":
-            output = gunet_segmentation_spct(images, centers, stddevs, 768, 256, name)
-        else:
-            if "NCI" in self.filePath:
-                height = self.shape[1] // 16 * 16
-                width = self.shape[2] // 16 * 16
-                output = gunet_segmentation(images, centers, stddevs, height, width, name)
-            else:
-                print(name)
-                output = gunet_segmentation(images, centers, stddevs, 960, 320, name)
-            # output = 1 / (1 + np.exp(-output[..., 1]) ** 0.8)
-            # output = graphcut(self.volume[i], output, sigma=80)
-        if output is None:
-            return None
-
-        if i in self.segCache:
-            self.backup = self.segCache[i]
-            self.backup_idx = i
-            # self.segCache[i] = np.maximum(self.segCache[i], output)
-            self.segCache[i] = output
-        else:
-            self.segCache[i] = output
-            self.backup_idx = i
-            self.backup = None
-
-        return True
-
-
-    def gnnu2d(self, name, i, centers=None, stddevs=None):
-        output, time = gnnu2d_segmentation(self.volume, i, centers, stddevs, 20, 1024, 320, self.guide_temp, name)
-        if output is None:
-            return None
-
-        if i in self.segCache:
-            self.backup = self.segCache[i]
-            self.backup_idx = i
-            self.segCache[i] = np.maximum(self.segCache[i], output)
-        else:
-            self.segCache[i] = output
-            self.backup_idx = i
-            self.backup = None
-
-        return True
-
-    def gnnu3d(self, name, centers=None, stddevs=None):
-        volume = self.volume if self.shape[0] == 20 else self.volume[:20]   # make sure >= 20
-        output = gnnu3d_segmentation(volume, centers, stddevs, 20, 512, 160, self.guide_temp, name)
-        if output is None:
-            return None
-
-        if len(self.segCache) == 0:
-            self.segCache = output
-        else:
-            self.backup = self.segCache
-            # self.segCache = np.maximum(self.segCache, output)
-            self.segCache = output
-
-        return True
-
     def undo(self):
-        if self.backup_idx >= 0:
-            if self.backup is not None:
-                self.segCache[self.backup_idx] = self.backup
-                self.backup = None
-                self.backup_idx = Image3d.BK_DEFAULT
-            else:
-                self.segCache.pop(self.backup_idx)
-        elif self.backup_idx == Image3d.BK_FIRST:
-            self.segCache = {}
-            self.backup_idx = Image3d.BK_DEFAULT
-        elif self.backup_idx == Image3d.BK_SECOND:
+        if self.backup is not None:
             self.segCache = self.backup
             self.backup = None
-            self.backup_idx = Image3d.BK_DEFAULT
-        return self.backup_idx
+            return True
+        return False
+
+    def seg_test(self, bbox, centers, stddevs):
+        z1, y1, x1, z2, y2, x2 = bbox
+        seg = np.zeros_like(self.volume, np.uint8)
+        seg[z1:z2, y1:y2, x1:x2] = 1
+        for c in centers['fg']:
+            seg[c[0], c[1] - 15: c[1] + 15, c[2] - 15: c[2] + 15] = 0
+        for c in centers['bg']:
+            seg[c[0], c[1] - 7: c[1] + 7, c[2] - 7: c[2] + 7] = 0
+        self.segCache = seg
+        return 0
+
+    def seg_gc(self, centers):
+        gc = GraphCut3D(self.volume, [1, 1, 1])
+        seeds = np.zeros_like(self.volume, np.uint8)
+        fg = np.array(centers["fg"], np.int32).reshape(-1, 3)
+        bg = np.array(centers["bg"], np.int32).reshape(-1, 3)
+        if fg.shape[0] > 0:
+            seeds[fg[:, 0], fg[:, 1], fg[:, 2]] = 1
+        if bg.shape[0] > 0:
+            seeds[bg[:, 0], bg[:, 1], bg[:, 2]] = 1
+        gc.set_seeds(seeds)
+        gc.run()
+        self.segCache = gc.segmentation
+        return 0
 
 
 class Header(object):
@@ -245,25 +184,13 @@ class Item3d(object):
         self.slice = slice_
 
 
-def computeDice(ref, pred, z, y, x, segLabel=False):
+def computeDice(ref, pred, bbox):
     if not (isinstance(ref, np.ndarray) and isinstance(pred, np.ndarray) and ref.shape == pred.shape):
         print(ref.shape, pred.shape)
         return -1
-    disc = ndi.generate_binary_structure(3, connectivity=3)
 
-    val = ref[z, y, x]
-    ref_choose = ref == val
-
-    if segLabel:
-        val = pred[z, y, x]
-        pred_choose = pred == val
-    else:
-        labeled_pred, _ = ndi.label(pred, disc)
-        val = labeled_pred[z, y, x]
-        pred_choose = labeled_pred == val
-
-    # ref_choose = np.clip(ref, 0, 1)
-    # pred_choose = np.clip(pred, 0, 1)
+    ref_choose = np.clip(ref, 0, 1)[bbox]
+    pred_choose = pred[bbox]
 
     v1 = np.count_nonzero(ref_choose * pred_choose)
     v2 = np.count_nonzero(ref_choose) + np.count_nonzero(pred_choose)
@@ -317,337 +244,6 @@ def write_nii(data, header, out_path, out_dtype=np.int16, affine=None):
     nib.save(out, str(out_path))
 
 
-def create_gaussian_distribution_v2(shape, centers, stddevs, indexing="ij", keepdims=False, geo=None):
-    """
-    Parameters
-    ----------
-    shape: list
-        two values
-    centers: ndarray
-        Float ndarray with shape [n, d], d means (x, y, ...)
-    stddevs: ndarray
-        Float ndarray with shape [n, d], d means (x, y, ...)
-    indexing: {'xy', 'ij'}, optional
-        Cartesian ('xy') or matrix ('ij', default) indexing of output.
-        See Notes for more details.
-    keepdims: bool
-        Keep final dimension
-
-    TODO(zjw) Warning: indexing='xy' need test
-
-    Returns
-    -------
-    A batch of spatial guide image with shape [h, w, 1] for 2D and [d, h, w, 1] for 3D
-
-    Notes
-    -----
-    -1s in center and stddev are padding value and almost don't affect spatial guide
-    """
-    centers = np.asarray(centers, np.float32)                                   # [n, 2]    if dimension=2
-    stddevs = np.asarray(stddevs, np.float32)                                   # [n, 2]
-    assert centers.ndim == 2, centers.shape
-    assert centers.shape == stddevs.shape, (centers.shape, stddevs.shape)
-    coords = [np.arange(0, s) for s in shape]
-    coords = np.tile(
-        np.stack(np.meshgrid(*coords, indexing=indexing), axis=-1)[None],
-        reps=[centers.shape[0]] + [1] * (centers.shape[1] + 1))                 # [n, h, w, 2]
-    coords = coords.astype(np.float32)
-
-    if len(shape) == 2:
-        centers = centers[..., None, None, :]                                       # [n, 1, 1, 2]
-        stddevs = stddevs[..., None, None, :]                                       # [n, 1, 1, 2]
-    elif len(shape) == 3:
-        centers = centers[..., None, None, None, :]  # [n, 1, 1, 2]
-        stddevs = stddevs[..., None, None, None, :]  # [n, 1, 1, 2]
-    else:
-        raise ValueError()
-    normalizer = 2 * stddevs * stddevs                                          # [n, 1, 1, 2]
-    d = np.exp(-np.sum((coords - centers) ** 2 / normalizer, axis=-1, keepdims=keepdims))   # [n, h, w, 1] / [n, h, w]
-    guide = np.max(d, axis=0)
-    # plt.imshow(guide)
-    # plt.show()
-    return guide
-
-
-def gunet_segmentation(triple, centers, stddevs, height, width, name):
-    h, w, d = triple.shape
-    img_input = triple.astype(np.float32)
-    img_input = np.clip(img_input, 0, 900) / 900
-
-    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
-        guide = np.ones((h, w), dtype=np.float32) * 0.5
-    else:
-        if isinstance(centers, dict):
-            guide_fg = create_gaussian_distribution_v2((h, w), centers["fg"], stddevs["fg"]) \
-                if len(centers["fg"]) > 0 else 0
-            guide_bg = create_gaussian_distribution_v2((h, w), centers["bg"], stddevs["bg"]) \
-                if len(centers["bg"]) > 0 else 0
-            guide = 0.5 + (guide_fg - guide_bg) * 0.425
-        else:
-            guide = create_gaussian_distribution_v2((h, w), centers, stddevs)
-    inputs = np.concatenate((img_input, guide[..., None]), axis=-1)
-    inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR)
-
-    host = "localhost"
-    port = 8500
-    channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
-    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
-
-    request = predict_pb2.PredictRequest()
-    request.model_spec.name = name
-    request.model_spec.signature_name = "serving_default"
-    request.inputs['height'].CopyFrom(tf.make_tensor_proto(height))
-    request.inputs['width'].CopyFrom(tf.make_tensor_proto(width))
-    request.inputs['images'].CopyFrom(tf.make_tensor_proto(inputs[..., :3], shape=[1, height, width, 3]))
-    request.inputs['guide'].CopyFrom(tf.make_tensor_proto(inputs[..., 3:], shape=[1, height, width, 1]))
-
-    try:
-        result = stub.Predict(request)
-    except Exception as e:
-        print(e)
-        result = None
-
-    # Reference:
-    # How to access nested values
-    # https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
-    # logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
-    if result is not None:
-        output = np.array(result.outputs["out_pred"].int64_val).reshape(height, width)
-        output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
-        # prob = np.array(result.outputs["out_prob"].float_val).reshape(height, width)
-        # prob = ndi.zoom(prob, (h / prob.shape[0], w / prob.shape[1]), order=1)
-        # np.save(Path(__file__).parent.parent / "prob.npy", prob)
-        # logit = np.array(result.outputs["out_logit"].float_val).reshape(height, width, 2)
-        # logit = ndi.zoom(logit, (h / logit.shape[0], w / logit.shape[1], 1), order=1)
-        # np.save(Path(__file__).parent.parent / "logit.npy", logit)
-        return output
-    else:
-        return None
-
-
-def gunet_segmentation_spct(triple, centers, stddevs, height, width, name):
-    h, w, d = triple.shape
-    img_input = triple.astype(np.float32)
-    img_input = np.clip(img_input, 0, 900) / 900
-
-    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
-        guide = np.ones((h, w), dtype=np.float32) * 0.5
-    else:
-        if isinstance(centers, dict):
-            guide_fg = create_gaussian_distribution_v2((h, w), centers["fg"], stddevs["fg"]) \
-                if len(centers["fg"]) > 0 else 0
-            guide_bg = create_gaussian_distribution_v2((h, w), centers["bg"], stddevs["bg"]) \
-                if len(centers["bg"]) > 0 else 0
-            guide = 0.5 + (guide_fg - guide_bg) * 0.425
-        else:
-            guide = create_gaussian_distribution_v2((h, w), centers, stddevs)
-    inputs = np.concatenate((img_input, guide[..., None]), axis=-1)
-    inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR)
-    # compute GLCM
-    feat_list = ["contrast", "dissimilarity", "homogeneity", "energy", "entropy", "correlation",
-                 "cluster_shade", "cluster_prominence"]
-    distances = (1, 2, 3)
-    angles = (0, 1, 2, 3)
-    glcm_feature_length = len(distances) * len(angles) * len(feat_list)
-    norm_img = (img_input[:, :, 1] * 255).astype(np.uint8)
-    angle = np.pi / 4
-
-    features = np.zeros((glcm_feature_length,), dtype=np.float32)
-    glcm_counter = 0
-
-    for (y, x), (b, a) in (zip(centers, stddevs) if not isinstance(centers, dict) else zip(centers["fg"], stddevs["fg"])):
-        a = max(16, int(a / 1.4826 * 2.2))
-        b = max(16, int(b / 1.4826 * 2.2))
-        x1 = min(norm_img.shape[1] - 2 * a, max(0, int(x) - a))
-        y1 = min(norm_img.shape[0] - 2 * b, max(0, int(x) - b))
-        x2 = x1 + a * 2
-        y2 = y1 + b * 2
-        image_patch = norm_img[y1:y2, x1:x2]
-        import matplotlib.pyplot as plt
-        plt.imshow(image_patch, cmap="gray")
-        plt.savefig("aa.png")
-        image_patch = ndi.gaussian_filter(image_patch, 0.5)
-        _, ff = glcm_features(image_patch, distances, [angle * x for x in angles],
-                              256, True, True, feat_list,
-                              flat=True, norm_levels=True)
-        features += np.array([ff[fe] for fe in feat_list]).reshape(-1)
-        glcm_counter += 1
-    context = features / glcm_counter
-
-    host = "localhost"
-    port = 8500
-    channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
-    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
-
-    request = predict_pb2.PredictRequest()
-    request.model_spec.name = name
-    request.model_spec.signature_name = "serving_default"
-    request.inputs['height'].CopyFrom(tf.make_tensor_proto(height))
-    request.inputs['width'].CopyFrom(tf.make_tensor_proto(width))
-    request.inputs['images'].CopyFrom(tf.make_tensor_proto(inputs[..., :3], shape=[1, height, width, 3]))
-    request.inputs['guide'].CopyFrom(tf.make_tensor_proto(inputs[..., 3:], shape=[1, height, width, 1]))
-    request.inputs['context'].CopyFrom(tf.make_tensor_proto(context[None], shape=[1, glcm_feature_length]))
-
-    try:
-        result = stub.Predict(request)
-    except Exception as e:
-        print(e)
-        result = None
-
-    if result is not None:
-        output = np.array(result.outputs["out_pred"].int64_val).reshape(height, width)
-        output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
-        return output
-    else:
-        return None
-
-
-def gunet_liver_segmentation(triple, centers, stddevs, height, width, name):
-    h, w, d = triple.shape
-    img_input = triple.astype(np.float32)
-    img_input = (np.clip(img_input, -200, 250) + 200) / 450
-
-    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
-        guide = np.ones((h, w), dtype=np.float32) * 0
-    else:
-        if isinstance(centers, dict):
-            guide_fg = create_gaussian_distribution_v2((h, w), centers["fg"], stddevs["fg"]) \
-                if len(centers["fg"]) > 0 else 0
-            guide_bg = create_gaussian_distribution_v2((h, w), centers["bg"], stddevs["bg"]) \
-                if len(centers["bg"]) > 0 else 0
-            guide = guide_fg - guide_bg
-        else:
-            guide = create_gaussian_distribution_v2((h, w), centers, stddevs) * 0.85
-    inputs = np.concatenate((img_input, guide[..., None]), axis=-1)
-    if height != inputs.shape[0] or width != inputs.shape[1]:
-        inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR)
-
-    host = "localhost"
-    port = 8500
-    channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
-    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
-
-    request = predict_pb2.PredictRequest()
-    request.model_spec.name = name
-    request.model_spec.signature_name = "serving_default"
-    request.inputs['height'].CopyFrom(tf.make_tensor_proto(height))
-    request.inputs['width'].CopyFrom(tf.make_tensor_proto(width))
-    request.inputs['images_bytes'].CopyFrom(tf.make_tensor_proto(inputs[..., :3], shape=[1, height, width, 3]))
-    request.inputs['guide_bytes'].CopyFrom(tf.make_tensor_proto(inputs[..., 3:], shape=[1, height, width, 1]))
-
-    try:
-        result = stub.Predict(request)
-    except:
-        result = None
-
-    # Reference:
-    # How to access nested values
-    # https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
-    # logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
-    if result is not None:
-        output = np.array(result.outputs["output_bytes"].int64_val).reshape(height, width)
-        output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
-        return output
-    else:
-        return None
-
-
-def gnnu3d_segmentation(image, centers, stddevs, depth, height, width, guide_temp, name):
-    d, h, w = image.shape
-    img_input = image.astype(np.float32)
-    #preprocessing...
-    img_input = (img_input - img_input.mean()) / (img_input.std() + 1e-8)
-
-    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0 or \
-            (isinstance(centers, dict) and len(centers["fg"]) == 0):
-        guide = np.zeros((d, h, w), dtype=np.float32)
-    else:
-        if isinstance(centers, dict):
-            guide_fg = create_gaussian_distribution_v2((d, h, w), centers["fg"], stddevs["fg"]) \
-                if len(centers["fg"]) > 0 else 0
-            guide_bg = create_gaussian_distribution_v2((d, h, w), centers["bg"], stddevs["bg"]) \
-                if len(centers["bg"]) > 0 else 0
-            guide = guide_fg - guide_bg
-        else:
-            guide = create_gaussian_distribution_v2((d, h, w), centers, stddevs)
-    inputs = np.concatenate((img_input[None], guide[None]), axis=0)
-    inputs = inputs.reshape((-1, h, w))
-    inputs = inputs.transpose((1, 2, 0))
-    inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR)
-    inputs = inputs.transpose((2, 0, 1))
-    inputs = inputs.reshape(2, depth, height, width)
-
-    host = "localhost"
-    port = 8500
-    channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
-    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
-
-    request = predict_pb2.PredictRequest()
-    request.model_spec.name = name
-    request.model_spec.signature_name = "serving_default"
-    request.inputs['in'].CopyFrom(tf.make_tensor_proto(inputs[None], shape=[1, 2, depth, height, width]))
-
-    try:
-        result = stub.Predict(request)
-    except Exception as e:
-        print(e)
-        result = None
-
-    # Reference:
-    # How to access nested values
-    # https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
-    # logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
-    if result is not None:
-        output = np.array(result.outputs["out"].int64_val).reshape(depth, height, width)
-        output = output.transpose((1, 2, 0))
-        output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
-        output = output.transpose((2, 0, 1))
-        return output
-    else:
-        return None
-
-
-def gnnu2d_segmentation(image, idx, centers, stddevs, depth, height, width, guide_temp, name):
-    d, h, w = image.shape
-    img_input = image[idx:idx + 1].astype(np.float32)
-    #preprocessing...
-    img_input = (img_input - img_input.mean()) / (img_input.std() + 1e-8)
-
-    if centers is None or stddevs is None or len(centers) == 0 or len(stddevs) == 0:
-        guide = np.ones((h, w), dtype=np.float32)
-    else:
-        guide = create_gaussian_distribution_v2((h, w), centers, stddevs) * 0.85
-    inputs = np.concatenate((img_input, guide[None]), axis=0).transpose((1, 2, 0))
-    inputs = cv2.resize(inputs, (width, height), interpolation=cv2.INTER_LINEAR).transpose((2, 0, 1))
-
-    host = "localhost"
-    port = 8500
-    channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port))
-    stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
-
-    request = predict_pb2.PredictRequest()
-    request.model_spec.name = name
-    request.model_spec.signature_name = "serving_default"
-    request.inputs['in'].CopyFrom(tf.make_tensor_proto(inputs[None], shape=[1, 2, height, width]))
-
-    try:
-        result = stub.Predict(request)
-    except Exception as e:
-        print(e)
-        result = None
-
-    # Reference:
-    # How to access nested values
-    # https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
-    # logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
-    if result is not None:
-        output = np.array(result.outputs["out"].int64_val).reshape(height, width)
-        output = cv2.resize(output, (w, h), interpolation=cv2.INTER_NEAREST)
-        return output
-    else:
-        return None
-
-
 def createEllipse(rect, shape):
     x, y, w, h = rect
     cy, cx = h // 2, w // 2
@@ -657,200 +253,3 @@ def createEllipse(rect, shape):
     ellipse_mask = np.zeros(shape, dtype=np.uint8)
     ellipse_mask[y:y + h, x:x + w] = np.sum(((coord - [cy, cx]) / [cy, cx]) ** 2, axis=-1) <= 1
     return ellipse_mask
-
-
-def compute_robust_moments(rect, shape, isotropic=False, indexing="ij", min_std=0.):
-    """
-    Compute robust center and standard deviation of a binary image(0: background, 1: foreground).
-
-    Support n-dimension array.
-
-    Parameters
-    ----------
-    binary_image: ndarray
-        Input a image
-    isotropic: boolean
-        Compute isotropic standard deviation or not.
-    indexing: {'xy', 'ij'}, optional
-        Cartesian ('xy') or matrix ('ij', default) indexing of output.
-        See Notes for more details.
-    min_std: float
-        Set stddev lower bound
-
-    Returns
-    -------
-    center: ndarray
-        A vector with dimension = `binary_image.ndim`. Median of all the points assigned 1.
-    std_dev: ndarray
-        A vector with dimension = `binary_image.ndim`. Standard deviation of all the points assigned 1.
-
-    Notes
-    -----
-    All the points assigned 1 are considered as a single object.
-
-    """
-    binary_image = createEllipse(rect, shape)
-    ndim = binary_image.ndim
-    coords = np.nonzero(binary_image)
-    points = np.asarray(coords).astype(np.float32)
-    if points.shape[1] == 0:
-        return np.array([-1.0] * ndim, dtype=np.float32), np.array([-1.0] * ndim, dtype=np.float32)
-    points = np.transpose(points)       # [pts, 2], 2: (i, j)
-    center = np.median(points, axis=0)  # [2]
-
-    # Compute median absolute deviation(short for mad) to estimate standard deviation
-    if isotropic:
-        diff = np.linalg.norm(points - center, axis=1)
-        mad = np.median(diff)
-        mad = np.array([mad] * ndim)
-    else:
-        diff = np.absolute(points - center)
-        mad = np.median(diff, axis=0)
-    std_dev = 1.4826 * mad
-    std_dev = np.maximum(std_dev, [min_std] * ndim)
-    if not indexing or indexing == "xy":
-        return center[::-1], std_dev[::-1]
-    elif indexing == "ij":
-        return center, std_dev
-    else:
-        raise ValueError("Valid values for `indexing` are 'xy' and 'ij'.")
-
-
-def graphcut(img, probability_map, sigma=1):
-    p = probability_map
-    g = mf.Graph[float]()
-    ids = g.add_grid_nodes(p.shape)
-    g.add_grid_tedges(ids, -np.log(p) * 0.2, -np.log(1 - p) * 0.2)
-
-    # add weights for edges
-    struct1 = np.array([[0, 1, 0],
-                        [0, 0, 0],
-                        [0, 1, 0]])
-    struct2 = np.array([[0, 0, 0],
-                        [1, 0, 1],
-                        [0, 0, 0]])
-    # struct3 = np.array([[1, 0, 0],
-    #                     [0, 0, 0],
-    #                     [0, 0, 1]])
-    # struct4 = np.array([[0, 0, 1],
-    #                     [0, 0, 0],
-    #                     [1, 0, 0]])
-    w1 = np.exp(-(img[1:] - img[:-1]) ** 2 / (2 * sigma ** 2))
-    g.add_grid_edges(ids, np.pad(w1, ((0, 1), (0, 0))), struct1, symmetric=1)
-    w2 = np.exp(-(img[:, 1:] - img[:, :-1]) ** 2 / (2 * sigma ** 2))
-    g.add_grid_edges(ids, np.pad(w2, ((0, 0), (0, 1))), struct2, symmetric=1)
-    # w3 = np.exp(-(img[1:, 1:] - img[:-1, :-1]) ** 2 / (2 * sigma ** 2)) / np.sqrt(2)
-    # g.add_grid_edges(ids, np.pad(w3, ((0, 1), (0, 1))), struct2, symmetric=1)
-    # w3 = np.exp(-(img[1:, :-1] - img[:-1, 1:]) ** 2 / (2 * sigma ** 2)) / np.sqrt(2)
-    # g.add_grid_edges(ids, np.pad(w3, ((0, 1), (1, 0))), struct2, symmetric=1)
-    g.maxflow()
-    sgm = g.get_grid_segments(ids)
-    return sgm
-
-
-def greycoprops(P, props=('contrast', )):
-    """ Extended version of skimage.feature.greycoprops() for supporting more features.
-    """
-    skutils.assert_nD(P, 4, 'P')
-
-    (num_level, num_level2, num_dist, num_angle) = P.shape
-    assert num_level == num_level2
-    assert num_dist > 0
-    assert num_angle > 0
-    results = OrderedDict()
-
-    # create weights for specified property
-    I, J = np.ogrid[0:num_level, 0:num_level]
-    if 'asm' in props or "energy" in props:
-        asm = np.sum(P ** 2, axis=(0, 1))
-        if "asm" in props:
-            results["asm"] = asm
-        if "energy" in props:
-            results["energy"] = np.sqrt(asm)
-    if 'contrast' in props:
-        weights = (I - J) ** 2
-        results["contrast"] = np.sum(P * weights[:, :, None, None], axis=(0, 1))
-    if 'dissimilarity' in props:
-        weights = np.abs(I - J)
-        results["dissimilarity"] = np.sum(P * weights[:, :, None, None], axis=(0, 1))
-    if "entropy" in props:
-        results["entropy"] = -np.apply_over_axes(np.sum, (P * np.log(P + 1e-16)), axes=(0, 1))[0, 0]
-    if 'homogeneity' in props:
-        weights = 1. / (1. + (I - J) ** 2)
-        results["homogeneity"] = np.sum(P * weights[:, :, None, None], axis=(0, 1))
-    if "correlation" in props or "cluster_shade" in props or "cluster_prominence" in props:
-        I = np.array(range(num_level)).reshape((num_level, 1, 1, 1))
-        J = np.array(range(num_level)).reshape((1, num_level, 1, 1))
-        mean_i = np.sum(I * P, axis=(0, 1))
-        mean_j = np.sum(J * P, axis=(0, 1))
-        diff_i = I - mean_i
-        diff_j = J - mean_j
-        if "correlation" in props:
-            std_i = np.sqrt(np.sum(P * (diff_i) ** 2, axis=(0, 1)))
-            std_j = np.sqrt(np.sum(P * (diff_j) ** 2, axis=(0, 1)))
-            cov = np.sum(P * (diff_i * diff_j), axis=(0, 1))
-            results["correlation"] = np.zeros((num_dist, num_angle), dtype=np.float64)
-            # handle the special case of standard deviations near zero
-            mask_0 = std_i < 1e-15
-            mask_0[std_j < 1e-15] = True
-            results["correlation"][mask_0] = 1
-            # handle the standard case
-            mask_1 = mask_0 == False
-            results["correlation"][mask_1] = cov[mask_1] / (std_i[mask_1] * std_j[mask_1])
-        if "cluster_shade" in props:
-            weights = (diff_i + diff_j) ** 3
-            results["cluster_shade"] = np.sum(P * weights, axis=(0, 1))
-        if "cluster_prominence" in props:
-            weights = (diff_i + diff_j) ** 4
-            results["cluster_prominence"] = np.sum(P * weights, axis=(0, 1))
-
-    return results
-
-
-def glcm_features(image, distances, angles, levels=256,
-                  symmetric=True, normed=True, features=None, flat=False, norm_levels=False):
-    glcm = feature.greycomatrix(
-        image, distances=distances, angles=angles, levels=levels, symmetric=symmetric, normed=normed)
-    if features is None:
-        return glcm
-
-    supported_features = ["contrast", "dissimilarity", "homogeneity", "asm", "energy", "correlation",
-                          "entropy", "cluster_shade", "cluster_prominence"]
-    for feat in features:
-        if feat not in supported_features:
-            raise ValueError("%s is an invalid property" % feat)
-    results = greycoprops(glcm, props=features)
-    if flat:
-        results = {k: v.reshape(-1) for k, v in results.items()}
-    if norm_levels:
-        if "dissimilarity" in results:
-            results["dissimilarity"] /= levels / 2 / 2
-        if "contrast" in results:
-            results["contrast"] /= (levels / 4) ** 2
-        if "cluster_shade" in results:
-            results["cluster_shade"] /= (levels / 4) ** 3
-        if "cluster_prominence" in results:
-            results["cluster_prominence"] /= (levels / 4) ** 4
-        if "homogeneity" in results:
-            results["homogeneity"] *= 2
-        if "asm" in results:
-            results["asm"] *= 2
-        if "energy" in results:
-            results["energy"] *= 2
-        if "entropy" in results:
-            results["entropy"] /= 8
-
-    return glcm, results
-
-
-if __name__ == "__main__":
-    rect = 250, 250, 50, 100
-    shape = 512, 512
-    mask0 = createEllipse(rect, shape)
-    center, stddev = compute_robust_moments(rect, shape)
-    mask = create_gaussian_distribution_v2(shape, [center], [stddev])
-    plt.subplot(121)
-    plt.imshow(mask0)
-    plt.subplot(122)
-    plt.imshow(mask)
-    plt.show()

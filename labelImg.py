@@ -14,20 +14,9 @@ from collections import defaultdict
 import numpy as np
 import cv2
 
-try:
-    from PyQt5.QtGui import *
-    from PyQt5.QtCore import *
-    from PyQt5.QtWidgets import *
-except ImportError:
-    # needed for py3+qt4
-    # Ref:
-    # http://pyqt.sourceforge.net/Docs/PyQt4/incompatible_apis.html
-    # http://stackoverflow.com/questions/21217399/pyqt4-qtcore-qvariant-object-instead-of-a-string
-    if sys.version_info.major >= 3:
-        import sip
-        sip.setapi('QVariant', 2)
-    from PyQt4.QtGui import *
-    from PyQt4.QtCore import *
+from PyQt5.QtGui import *
+from PyQt5.QtCore import *
+from PyQt5.QtWidgets import *
 
 from libs.resources import *
 from libs.constants import *
@@ -41,12 +30,10 @@ from libs.labelDialog import LabelDialog
 from libs.colorDialog import ColorDialog
 from libs.labelFile import LabelFile, LabelFileError
 from libs.toolBar import ToolBar
-from libs.pascal_voc_io import PascalVocReader, XML_EXT
-from libs.yolo_io import YoloReader, TXT_EXT
 from libs.common_io import CommonReader, COMM_EXT
 from libs.ustr import ustr
 from libs.hashableQListWidgetItem import HashableQListWidgetItem, HashableQTableWidgetItem
-from libs.image3d import read3d, Image3d, Item3d, DSKey, compute_robust_moments, write_nii, read_nii, computeDice
+from libs.image3d import read3d, Image3d, DSKey, write_nii, read_nii, computeDice
 
 
 __appname__ = 'labelImg'
@@ -90,9 +77,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Save as Pascal voc xml
         self.defaultSaveDir = defaultSaveDir
-        self.usingPascalVocFormat = False
-        self.usingYoloFormat = False
-        self.usingCommonFormat = True
+        # Save segmentation
+        self.defaultSegDir = None
 
         # For loading all image under a directory
         self.mImgList = []
@@ -178,7 +164,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.segAutoCheckBox = QCheckBox("Auto: ")
         self.segAutoCheckBox.setChecked(settings.get(SETTING_AUTO_SEG, False))
         self.segAutoCheckBox.setLayoutDirection(Qt.RightToLeft)
-        self.labelShowCheckBox = QCheckBox("Show: ")
+        self.labelShowCheckBox = QCheckBox("Show Label:")
         self.labelShowCheckBox.setChecked(True)
         self.labelShowCheckBox.setLayoutDirection(Qt.RightToLeft)
         self.labelShowCheckBox.stateChanged.connect(self.labelShowStateChanged)
@@ -193,39 +179,24 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # segmentation algorithmDann
         segAlgLabel = QLabel(getStr("segAlgLabel"))
-        self.segAlg = ["G-UNet NF SP", "Gnnu 3D NF Semi", "Gnnu 3D NF Both", "Gnnu 2D NF Both", "Gnnu 2D NF Semi",
-                       "G-UNet Liver SP", "Gnnu 3D NF wo Norm", "G-UNet NF SPCT"]
-        self.segName = ["112_nf_sp_fix", "nf_semi_3d", "nf_both_3d", "nf_both_2d", "nf_semi_2d",
-                        "012_gnet_sp_f0", "nf_3d_wo_norm", "115_nf_both1_v2"]
+        self.segAlg = ["Test", "!Graph Cut 3D", "!Random Walk 3D", "!Active Contour 3D", "!Deep Learning"]
+        self.segName = ["Test",  "GraphCut3D", "RandomWalk3D", "ActiveContour3D", "grpc_model"]
         self.segAlgComboBox = QComboBox()
         self.segAlgComboBox.addItems(self.segAlg)
-        self.segBgCheckBox = QCheckBox("Background: ")
-        self.segBgCheckBox.setChecked(False)
-        self.segBgCheckBox.setLayoutDirection(Qt.RightToLeft)
-        self.segBgCheckBox.setShortcut(QKeySequence("Shift+F"))
-        self.segShowCheckBox = QCheckBox()
+        self.segShowCheckBox = QCheckBox("Show Seg:")
         self.segShowCheckBox.setChecked(True)
-        self.segShowCheckBox.setVisible(True)
+        self.segShowCheckBox.setLayoutDirection(Qt.RightToLeft)
         self.segShowCheckBox.setShortcut(QKeySequence(Qt.Key_S))
         self.segShowCheckBox.stateChanged.connect(self.updateCanvasImage)
-        self.segShowLiverCheckBox = QCheckBox()
-        self.segShowLiverCheckBox.setChecked(True)
-        self.segShowLiverCheckBox.setVisible(True)
-        self.segShowLiverCheckBox.setShortcut(QKeySequence(Qt.Key_L))
-        self.segShowLiverCheckBox.stateChanged.connect(self.updateCanvasImage)
-        self.segComputeDiceCheckBox = QCheckBox()
-        self.segComputeDiceCheckBox.setChecked(False)
-        self.segComputeDiceCheckBox.setVisible(True)
-        self.segComputeDiceCheckBox.setShortcut(QKeySequence(Qt.Key_C))
-        self.segComputeDiceCheckBox.stateChanged.connect(self.computeDiceStateChanged)
+        self.segComputeDiceButton = QPushButton("Dice")
+        self.segComputeDiceButton.setShortcut(QKeySequence(Qt.Key_Space))
+        self.segComputeDiceButton.clicked.connect(self.computeDiceClicked)
 
         segAlgLayout = QHBoxLayout()
         segAlgLayout.addWidget(segAlgLabel)
         segAlgLayout.addWidget(self.segAlgComboBox)
-        segAlgLayout.addWidget(self.segBgCheckBox)
-        segAlgLayout.addWidget(self.segShowLiverCheckBox)
         segAlgLayout.addWidget(self.segShowCheckBox)
-        segAlgLayout.addWidget(self.segComputeDiceCheckBox)
+        segAlgLayout.addWidget(self.segComputeDiceButton)
         segAlgLayout.addItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
         self.segAlgContainer = QWidget()
         self.segAlgContainer.setLayout(segAlgLayout)
@@ -279,16 +250,12 @@ class MainWindow(QMainWindow, WindowMixin):
         useDefaultLabelContainer = QWidget()
         useDefaultLabelContainer.setLayout(useDefaultLabelQHBoxLayout)
 
-        # Create a widget for edit and diffc button
-        self.diffcButton = QCheckBox(getStr('useDifficult'))
-        self.diffcButton.setChecked(False)
-        self.diffcButton.stateChanged.connect(self.btnstate)
+        # Create a widget for edit button
         self.editButton = QToolButton()
         self.editButton.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
 
         # Add some of widgets to listLayout
         listLayout.addWidget(self.editButton)
-        listLayout.addWidget(self.diffcButton)
         listLayout.addWidget(useDefaultLabelContainer)
 
         # Create and add a widget for showing current label items
@@ -306,7 +273,7 @@ class MainWindow(QMainWindow, WindowMixin):
         table = QTableWidget()
         table.itemActivated.connect(self.labelSelectionChanged)
         table.itemSelectionChanged.connect(self.labelSelectionChanged)
-        table.itemDoubleClicked.connect(self.editLabel)
+        # table.itemDoubleClicked.connect(self.editLabel)
         table.itemChanged.connect(self.labelItemChanged)
         font = QFont()
         font.setBold(True)
@@ -316,13 +283,16 @@ class MainWindow(QMainWindow, WindowMixin):
         table.horizontalHeader().setStretchLastSection(True)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setColumnCount(3)
+        table.setColumnCount(5)
         table.horizontalHeader().resizeSection(0, 40)
         table.horizontalHeader().resizeSection(1, 80)
+        table.horizontalHeader().resizeSection(2, 80)
+        table.horizontalHeader().resizeSection(3, 80)
         table.setHorizontalHeaderLabels([getStr('tableHeaderAxis'), getStr('tableHeaderSlice'),
+                                         getStr('tableHeaderZ1'), getStr('tableHeaderZ2'),
                                          getStr('tableHeaderLabel')])
         table.horizontalHeader().setSectionsClickable(True)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.labelTable = table
         listLayout.addWidget(self.labelTable)
 
@@ -362,7 +332,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.shapeMoved.connect(self.setDirty)
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
-        self.canvas.computeDiceRequest.connect(self.computeDice)
 
         self.setCentralWidget(scroll)
         self.addDockWidget(Qt.RightDockWidgetArea, self.settingDock)
@@ -372,6 +341,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.dockFeatures = QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetFloatable
         self.dock.setFeatures(self.dock.features() ^ self.dockFeatures)
+
+        self.esc_func = QShortcut(QKeySequence('Esc'), self)
+        self.esc_func.activated.connect(self.setEdit)
 
         # Actions
         action = partial(newAction, self)
@@ -396,14 +368,8 @@ class MainWindow(QMainWindow, WindowMixin):
         openPrevImg = action(getStr('prevImg'), self.openPrevImg,
                              'a', 'prev', getStr('prevImgDetail'))
 
-        verify = action(getStr('verifyImg'), self.verifyImg,
-                        'space', 'verify', getStr('verifyImgDetail'))
-
         save = action(getStr('save'), self.saveFile,
                       'Ctrl+S', 'save', getStr('saveDetail'), enabled=False)
-
-        save_format = action('&Common', self.change_format,
-                             'Ctrl+', 'format_comm', getStr('changeSaveFormat'), enabled=True)
 
         saveAs = action(getStr('saveAs'), self.saveFileAs,
                         'Ctrl+Shift+S', 'save-as', getStr('saveAsDetail'), enabled=False)
@@ -512,7 +478,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.drawSquaresOption.triggered.connect(self.toogleDrawSquare)
 
         # Store actions for further handling.
-        self.actions = struct(save=save, save_format=save_format, saveAs=saveAs, open=open, close=close, resetAll=resetAll,
+        self.actions = struct(save=save, saveAs=saveAs, open=open, close=close, resetAll=resetAll,
                               lineColor=color1, create=create, createEllipse=createEllipse, createPoint=createPoint,
                               delete=delete, edit=edit, copy=copy,
                               createMode=createMode, createEllipseMode=createEllipseMode, createPointMode=createPointMode,
@@ -563,7 +529,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.displayLabelOption.triggered.connect(self.togglePaintLabelsOption)
 
         addActions(self.menus.file,
-                   (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs, close, resetAll, quit))
+                   (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles,
+                    save, saveAs, close, resetAll, quit))
         addActions(self.menus.help, (help, showInfo))
         addActions(self.menus.view, (
             self.autoSaving,
@@ -576,20 +543,14 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.menus.file.aboutToShow.connect(self.updateFileMenu)
 
-        # Custom context menu for the canvas widget:
-        addActions(self.canvas.menus[0], self.actions.beginnerContext)
-        addActions(self.canvas.menus[1], (
-            action('&Copy here', self.copyShape),
-            action('&Move here', self.moveShape)))
-
         self.tools = self.toolbar('Tools')
         self.actions.beginner = (
-            open, opendir, changeSavedir, openNextImg, openPrevImg, verify, save, save_format, None,
+            open, opendir, changeSavedir, openNextImg, openPrevImg, saveAs, None,
             create, createEllipse, createPoint, copy, delete, None,
             zoomIn, zoom, zoomOut, fitWindow, fitWidth)
 
         self.actions.advanced = (
-            open, opendir, changeSavedir, openNextImg, openPrevImg, save, save_format, None,
+            open, opendir, changeSavedir, openNextImg, openPrevImg, save, None,
             createMode, createEllipseMode, createPointMode, editMode, None,
             hideAll, showAll)
 
@@ -605,8 +566,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self.fillColor = None
         self.zoom_level = 100
         self.fit_window = False
-        # Add Chris
-        self.difficult = False
 
         ## Fix the compatible issue for qt4 and qt5. Convert the QStringList to python list
         if settings.get(SETTING_RECENT_FILES):
@@ -614,7 +573,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 recentFileQStringList = settings.get(SETTING_RECENT_FILES)
                 self.recentFiles = [ustr(i) for i in recentFileQStringList]
             else:
-                self.recentFiles = recentFileQStringList = settings.get(SETTING_RECENT_FILES)
+                self.recentFiles = settings.get(SETTING_RECENT_FILES)
 
         size = settings.get(SETTING_WIN_SIZE, QSize(600, 500))
         position = QPoint(0, 0)
@@ -638,8 +597,6 @@ class MainWindow(QMainWindow, WindowMixin):
         Shape.line_color = self.lineColor = QColor(settings.get(SETTING_LINE_COLOR, DEFAULT_LINE_COLOR))
         Shape.fill_color = self.fillColor = QColor(settings.get(SETTING_FILL_COLOR, DEFAULT_FILL_COLOR))
         self.canvas.setDrawingColor(self.lineColor)
-        # Add chris
-        Shape.difficult = self.difficult
 
         def xbool(x):
             if isinstance(x, QVariant):
@@ -676,7 +633,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Open Dir if deafult file
         if self.filePath and os.path.isdir(self.filePath):
-            self.openDirDialog(dirpath=self.filePath, silent=True)
+            self.openDirDialog(silent=True)
 
     def keyReleaseEvent(self, event):
         if event.key() == Qt.Key_Control:
@@ -686,35 +643,6 @@ class MainWindow(QMainWindow, WindowMixin):
         if event.key() == Qt.Key_Control:
             # Draw rectangle if Ctrl is pressed
             self.canvas.setDrawingShapeToSquare(True)
-
-    ## Support Functions ##
-    def set_format(self, save_format):
-        if save_format == FORMAT_PASCALVOC:
-            self.actions.save_format.setText(FORMAT_PASCALVOC)
-            self.actions.save_format.setIcon(newIcon("format_voc"))
-            self.usingPascalVocFormat = True
-            self.usingYoloFormat = False
-            self.usingCommonFormat = False
-            LabelFile.suffix = XML_EXT
-        elif save_format == FORMAT_YOLO:
-            self.actions.save_format.setText(FORMAT_YOLO)
-            self.actions.save_format.setIcon(newIcon("format_yolo"))
-            self.usingPascalVocFormat = False
-            self.usingYoloFormat = True
-            self.usingCommonFormat = False
-            LabelFile.suffix = TXT_EXT
-        elif save_format == FORMAT_COMMON:
-            self.actions.save_format.setText(FORMAT_COMMON)
-            self.actions.save_format.setIcon(newIcon("format_comm"))
-            self.usingPascalVocFormat = False
-            self.usingYoloFormat = False
-            self.usingCommonFormat = True
-            LabelFile.suffix = COMM_EXT
-
-    def change_format(self):
-        if self.usingPascalVocFormat: self.set_format(FORMAT_YOLO)
-        elif self.usingYoloFormat: self.set_format(FORMAT_COMMON)
-        elif self.usingCommonFormat: self.set_format(FORMAT_PASCALVOC)
 
     def noShapes(self):
         return not self.itemsToShapes
@@ -735,13 +663,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def populateModeActions(self):
         if self.beginner():
-            tool, menu = self.actions.beginner, self.actions.beginnerContext
+            tool = self.actions.beginner
         else:
-            tool, menu = self.actions.advanced, self.actions.advancedContext
+            tool = self.actions.advanced
         self.tools.clear()
         addActions(self.tools, tool)
-        self.canvas.menus[0].clear()
-        addActions(self.canvas.menus[0], menu)
         self.menus.edit.clear()
         actions = (self.actions.create, self.actions.createEllipse, self.actions.createPoint) if self.beginner()\
             else (self.actions.createMode, self.actions.createEllipseMode, self.actions.createPointMode,
@@ -801,7 +727,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if items:
                 # We only choice `label` cell for indexing
                 if len(items) > 2:
-                    return items[2]
+                    return items[-1]
                 else:   # Only `label` cell is selected
                     return items[0]
         return None
@@ -897,6 +823,15 @@ class MainWindow(QMainWindow, WindowMixin):
         self.toggleDrawMode(True)
         self.labelSelectionChanged()
 
+    def setEdit(self):
+        if self.beginner():  # Switch to edit mode.
+            self.canvas.setEditing(True)
+            for act in self.actions.createActions:
+                act.setEnabled(True)
+        else:
+            self.actions.editMode.setEnabled(True)
+        self.canvas.restoreCursor()
+
     def updateFileMenu(self):
         currFilePath = self.filePath
 
@@ -935,33 +870,6 @@ class MainWindow(QMainWindow, WindowMixin):
             filename = self.mImgList[currIndex]
             if filename:
                 self.loadFile(filename)
-
-    # Add chris
-    def btnstate(self, item=None):
-        """ Function to handle difficult examples
-        Update on each object """
-        if not self.canvas.editing():
-            return
-
-        item = self.currentItem()
-        if not item: # If not selected Item, take the first one
-            item = self.labelList.item(self.labelList.count()-1)
-
-        difficult = self.diffcButton.isChecked()
-
-        try:
-            shape = self.itemsToShapes[item]
-        except:
-            pass
-        # Checked and Update
-        try:
-            if difficult != shape.difficult:
-                shape.difficult = difficult
-                self.setDirty()
-            else:  # User probably changed item visibility
-                self.canvas.setShapeVisible(shape, item.checkState() == Qt.Checked)
-        except:
-            pass
 
     # React to canvas signals.
     def shapeSelectionChanged(self, selected=False):
@@ -1010,16 +918,30 @@ class MainWindow(QMainWindow, WindowMixin):
             self.labelTable.setItem(row, 0, item0)
             item1 = QTableWidgetItem(str(idx))
             item1.setBackground(color)
-            item1.setFlags(item0.flags() ^ Qt.ItemIsEditable)
+            item1.setFlags(item1.flags() ^ Qt.ItemIsEditable)
             self.labelTable.setItem(row, 1, item1)
-            item = HashableQTableWidgetItem(shape.label)
+
+            z1 = shape.z1 if shape.z1 >= 0 else idx
+            item2 = HashableQTableWidgetItem(2, str(z1))
+            item2.setBackground(color)
+            self.itemsToShapes[item2] = shape
+            self.labelTable.setItem(row, 2, item2)
+            z2 = shape.z2 if shape.z2 >= 0 else idx
+            item3 = HashableQTableWidgetItem(3, str(z2))
+            item3.setBackground(color)
+            self.itemsToShapes[item3] = shape
+            self.labelTable.setItem(row, 3, item3)
+            shape.z1 = z1
+            shape.z2 = z2
+
+            item = HashableQTableWidgetItem(4, shape.label)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Checked)
             item.setBackground(color)
             self.itemsToShapes[item] = shape
             self.shapesToItems[shape] = item
-            self.shapesToOthers[shape] = [item0, item1]
-            self.labelTable.setItem(row, 2, item)
+            self.shapesToOthers[shape] = [item0, item1, item2, item3]
+            self.labelTable.setItem(row, 4, item)
 
         for action in self.actions.onShapesPresent:
             action.setEnabled(True)
@@ -1043,22 +965,30 @@ class MainWindow(QMainWindow, WindowMixin):
         shapes_3d = {}
         for case in shapes:
             if isinstance(case, (list, tuple)):
-                label, points, line_color, fill_color, difficult = case
+                label, points, line_color, fill_color = case
                 dtype = Shape.RECTANGLE
                 axis = 0
                 sidx = 0
+                z1 = sidx
+                z2 = sidx
+                fg = True
             elif isinstance(case, dict):
-                dtype, label, points, line_color, fill_color, difficult = \
-                    case["type"], case["label"], case["shape"], case["color1"], case["color2"], case["difficult"]
+                dtype, label, points, line_color, fill_color = \
+                    case["type"], case["label"], case["shape"], case["color1"], case["color2"]
                 axis = case.get("axis", 0)
                 sidx = case.get("slice", 0)
+                fg = case.get("fg", True)
+                z1 = case.get("z1", sidx)
+                z2 = case.get("z2", sidx)
             else:
                 raise RuntimeError("Wrong shape:", case)
             
             if dtype == Shape.RECTANGLE:
                 shape = Shape(label=label)
+                shape.z1 = z1
+                shape.z2 = z2
             elif dtype == Shape.POINT:
-                shape = Point(label=label)
+                shape = Point(label=label, foreground=fg)
             elif dtype == Shape.ELLIPSE:
                 shape = Ellipse(label=label)
             else:
@@ -1071,7 +1001,6 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.setDirty()
 
                 shape.addPoint(QPointF(x, y))
-            shape.difficult = difficult
             shape.close()
 
             key = DSKey.ds2key(axis, sidx)
@@ -1100,41 +1029,32 @@ class MainWindow(QMainWindow, WindowMixin):
             self.labelFile.verified = self.canvas.verified
 
         def format_shape(s, key=None):
+            items = self.shapesToOthers[s]
             formatted = dict(label=s.label,
                              dtype=s.type_,
                              line_color=s.line_color.getRgb(),
                              fill_color=s.fill_color.getRgb(),
                              points=[(p.x(), p.y()) for p in s.points],
-                             # add chris
-                             difficult=s.difficult)
+                             z1=int(items[2].text()),
+                             z2=int(items[3].text()),
+                             )
             if key:
                 formatted["axis"] = key[0]
                 formatted["slice"] = key[1]
+                if s.type_ == Shape.POINT:
+                    formatted['fg'] = s.fg
             return formatted
 
         if self.dim == TWO_D:
             shapes = [format_shape(shape) for shape in self.canvas.shapes_3d[DSKey.ds2key(0, 0)]]
         else:
-            shapes = [format_shape(shape, DSKey.key2ds(key)) for key, shapes in self.canvas.shapes_3d.items() for shape in shapes]
+            shapes = [format_shape(shape, DSKey.key2ds(key))
+                      for key, shapes in self.canvas.shapes_3d.items() for shape in shapes]
         # Can add differrent annotation formats here
         try:
-            if self.usingPascalVocFormat:
-                if annotationFilePath[-4:].lower() != ".xml":
-                    annotationFilePath += XML_EXT
-                self.labelFile.savePascalVocFormat(annotationFilePath, shapes, self.filePath, self.imageData,
-                                                   self.lineColor.getRgb(), self.fillColor.getRgb())
-            elif self.usingYoloFormat:
-                if annotationFilePath[-4:].lower() != ".txt":
-                    annotationFilePath += TXT_EXT
-                self.labelFile.saveYoloFormat(annotationFilePath, shapes, self.filePath, self.imageData, self.labelHist,
-                                              self.lineColor.getRgb(), self.fillColor.getRgb())
-            elif self.usingCommonFormat:
-                if annotationFilePath[-5:].lower() != ".cxml":
-                    annotationFilePath += COMM_EXT
-                self.labelFile.saveCommonFormat(annotationFilePath, shapes, self.filePath, self.imageData)
-            else:
-                self.labelFile.save(annotationFilePath, shapes, self.filePath, self.imageData,
-                                    self.lineColor.getRgb(), self.fillColor.getRgb())
+            if annotationFilePath[-5:].lower() != ".cxml":
+                annotationFilePath += COMM_EXT
+            self.labelFile.saveCommonFormat(annotationFilePath, shapes, self.filePath)
             print('Image:{0} -> Annotation:{1}'.format(self.filePath, annotationFilePath))
             return True
         except LabelFileError as e:
@@ -1155,10 +1075,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if item and self.canvas.editing():
             self._noSelectionSlot = True    # Avoid selection loop between shape <-> item
             shape = self.itemsToShapes[item]
-            if self.dim == TWO_D:
-                # Add Chris
-                self.diffcButton.setChecked(shape.difficult)
-            else:
+            if self.dim != TWO_D:
                 slice_index = int(self.shapesToOthers[shape][1].text())
                 self.idx = slice_index
                 self.canvas.setPtr(self.axis, self.idx)
@@ -1170,18 +1087,22 @@ class MainWindow(QMainWindow, WindowMixin):
         if not isinstance(item, (HashableQTableWidgetItem, HashableQListWidgetItem)):
             return
         shape = self.itemsToShapes[item]
-        label = item.text()
-        if label != shape.label:
+
+        if item.col_ == 4 and item.text() != shape.label:
             shape.label = item.text()
             shape.line_color = generateColorByText(shape.label)
             self.setDirty()
+        elif item.col_ == 2:
+            shape.z1 = int(item.text())
+        elif item.col_ == 3:
+            shape.z2 = int(item.text())
         else:  # User probably changed item visibility
             self.canvas.setShapeVisible(shape, item.checkState() == Qt.Checked)
 
     def labelShowStateChanged(self):
         state = self.labelShowCheckBox.checkState()
         for i in range(self.labelTable.rowCount()):
-            self.labelTable.item(i, 2).setCheckState(state)
+            self.labelTable.item(i, 4).setCheckState(state)
 
     # Callback functions:
     def newShape(self):
@@ -1206,8 +1127,6 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             text = self.defaultLabelTextLine.text()
 
-        # Add Chris
-        self.diffcButton.setChecked(False)
         if text is not None:
             self.prevLabelText = text
             generate_color = generateColorByText(text)
@@ -1346,33 +1265,18 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.mImgList.clear()
                 
         if unicodeFilePath and os.path.exists(unicodeFilePath):
-            if LabelFile.isLabelFile(unicodeFilePath):  # Bug
-                try:
-                    self.labelFile = LabelFile(unicodeFilePath)
-                except LabelFileError as e:
-                    self.errorMessage(u'Error opening file',
-                                      (u"<p><b>%s</b></p>"
-                                       u"<p>Make sure <i>%s</i> is a valid label file.")
-                                      % (e, unicodeFilePath))
-                    self.status("Error reading %s" % unicodeFilePath)
-                    return False
-                self.imageData = self.labelFile.imageData
-                self.lineColor = QColor(*self.labelFile.lineColor)
-                self.fillColor = QColor(*self.labelFile.fillColor)
-                self.canvas.verified = self.labelFile.verified
+            # Load image:
+            # read data first and store for saving into label file.
+            if not self.is3dimage(unicodeFilePath):
+                self.imageData = read(unicodeFilePath, None)
+                self.dim = TWO_D
             else:
-                # Load image:
-                # read data first and store for saving into label file.
-                if not self.is3dimage(unicodeFilePath):
-                    self.imageData = read(unicodeFilePath, None)
-                    self.dim = TWO_D
-                else:
-                    self.i3d = read3d(unicodeFilePath)
-                    self.i3d.setIntensityClip(low=self.int_low.value(), high=self.int_high.value())
-                    self.dim = THREE_D
-                    self.set_format(FORMAT_COMMON)
-                self.labelFile = None
-                self.canvas.verified = False
+                self.i3d = read3d(unicodeFilePath)
+                self.i3d.setIntensityClip(low=self.int_low.value(), high=self.int_high.value())
+                self.dim = THREE_D
+                self.ref = None
+            self.labelFile = None
+            self.canvas.verified = False
 
             if self.dim == TWO_D:
                 self.sliceNumber.setText("")
@@ -1380,16 +1284,14 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.labelList.setVisible(True)
                 self.labelTable.setVisible(False)
                 self.settingDock.setVisible(False)
-                self.diffcButton.setVisible(True)
             else:
                 self.idx = 0
                 self.sliceNumber.setText("Slice: {:3d} / Total: {:3d}".format(self.idx, self.i3d.shape[self.axis]))
                 image = self.i3d.at(self.idx, self.axis,
-                                    self.segShowCheckBox.isChecked(), self.segShowLiverCheckBox.isChecked())
+                                    self.segShowCheckBox.isChecked())
                 self.labelList.setVisible(False)
                 self.labelTable.setVisible(True)
                 self.settingDock.setVisible(True)
-                self.diffcButton.setVisible(False)
                 self.segAlgButtonRun.setEnabled(True)
                 self.segAlgButtonSave.setEnabled(True)
                 self.total_time = 0
@@ -1412,37 +1314,22 @@ class MainWindow(QMainWindow, WindowMixin):
             self.toggleActions(True)
 
             # Label xml file and show bound box according to its filename
-            # if self.usingPascalVocFormat is True:
             if self.defaultSaveDir is not None:
                 basename = os.path.basename(
                     os.path.splitext(self.filePath)[0])
-                xmlPath = os.path.join(self.defaultSaveDir, basename + XML_EXT)
-                txtPath = os.path.join(self.defaultSaveDir, basename + TXT_EXT)
                 cxmlPath = os.path.join(self.defaultSaveDir, basename + COMM_EXT)
                 
-                """Annotation file priority:
-                Common > PascalXML > YOLO
-                """
+                """Annotation file priority: Common """
                 if os.path.isfile(cxmlPath):
                     print("Load annotation: ", cxmlPath)
                     self.loadCommonXMLByFilename(cxmlPath)
-                elif os.path.isfile(xmlPath):
-                    self.loadPascalXMLByFilename(xmlPath)
-                elif os.path.isfile(txtPath):
-                    self.loadYOLOTXTByFilename(txtPath)
                 else:
                     self.canvas.loadShapes({})
             else:
-                xmlPath = os.path.splitext(filePath)[0] + XML_EXT
-                txtPath = os.path.splitext(filePath)[0] + TXT_EXT
                 cxmlPath = os.path.splitext(filePath)[0] + COMM_EXT
                 if os.path.isfile(cxmlPath):
                     print("Load annotation: ", cxmlPath)
                     self.loadCommonXMLByFilename(cxmlPath)
-                elif os.path.isfile(xmlPath):
-                    self.loadPascalXMLByFilename(xmlPath)
-                elif os.path.isfile(txtPath):
-                    self.loadYOLOTXTByFilename(txtPath)
                 else:
                     self.canvas.loadShapes({})
 
@@ -1453,8 +1340,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.labelList.setCurrentItem(self.labelList.item(self.labelList.count()-1))
                 self.labelList.item(self.labelList.count()-1).setSelected(True)
             if self.dim == THREE_D and self.labelTable.rowCount():
-                self.labelTable.setCurrentItem(self.labelTable.item(self.labelTable.rowCount() - 1, 2))
-                self.labelTable.item(self.labelTable.rowCount() - 1, 2).setSelected(True)
+                self.labelTable.setCurrentItem(self.labelTable.item(self.labelTable.rowCount() - 1, 4))
+                self.labelTable.item(self.labelTable.rowCount() - 1, 4).setSelected(True)
 
             self.canvas.setFocus(True)
             return True
@@ -1514,6 +1401,10 @@ class MainWindow(QMainWindow, WindowMixin):
             settings[SETTING_SAVE_DIR] = ustr(self.defaultSaveDir)
         else:
             settings[SETTING_SAVE_DIR] = ''
+        if self.defaultSegDir and os.path.exists(self.defaultSegDir):
+            settings[SETTING_SEG_DIR] = ustr(self.defaultSegDir)
+        else:
+            settings[SETTING_SEG_DIR] = ''
 
         if self.lastOpenDir and os.path.exists(self.lastOpenDir):
             settings[SETTING_LAST_OPEN_DIR] = self.lastOpenDir
@@ -1562,9 +1453,9 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             path = '.'
 
-        dirpath = ustr(QFileDialog.getExistingDirectory(self,
-                                                        '%s - Save annotations to the directory' % __appname__, path,  QFileDialog.ShowDirsOnly
-                                                        | QFileDialog.DontResolveSymlinks))
+        dirpath = ustr(QFileDialog.getExistingDirectory(
+            self, '%s - Save annotations to the directory' % __appname__, path,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks))
 
         if dirpath is not None and len(dirpath) > 1:
             self.defaultSaveDir = dirpath
@@ -1574,26 +1465,26 @@ class MainWindow(QMainWindow, WindowMixin):
         self.statusBar().show()
 
     def openAnnotationDialog(self, _value=False):
-        if self.filePath is None:
-            self.statusBar().showMessage('Please select image first')
-            self.statusBar().show()
-            return
+        # if self.filePath is None:
+        #     self.statusBar().showMessage('Please select image first')
+        #     self.statusBar().show()
+        #     return
+        #
+        # path = os.path.dirname(ustr(self.filePath))\
+        #     if self.filePath else '.'
+        # if self.usingPascalVocFormat:
+        #     filters = "Open Annotation XML file (%s)" % ' '.join(['*.xml'])
+        #     filename = ustr(QFileDialog.getOpenFileName(self,'%s - Choose a xml file' % __appname__, path, filters))
+        #     if filename:
+        #         if isinstance(filename, (tuple, list)):
+        #             filename = filename[0]
+        #     self.loadPascalXMLByFilename(filename)
+        pass
 
-        path = os.path.dirname(ustr(self.filePath))\
-            if self.filePath else '.'
-        if self.usingPascalVocFormat:
-            filters = "Open Annotation XML file (%s)" % ' '.join(['*.xml'])
-            filename = ustr(QFileDialog.getOpenFileName(self,'%s - Choose a xml file' % __appname__, path, filters))
-            if filename:
-                if isinstance(filename, (tuple, list)):
-                    filename = filename[0]
-            self.loadPascalXMLByFilename(filename)
-
-    def openDirDialog(self, _value=False, dirpath=None, silent=False):
+    def openDirDialog(self, _value=False, silent=False):
         if not self.mayContinue():
             return
 
-        defaultOpenDirPath = dirpath if dirpath else '.'
         if self.lastOpenDir and os.path.exists(self.lastOpenDir):
             defaultOpenDirPath = self.lastOpenDir
         else:
@@ -1620,24 +1511,6 @@ class MainWindow(QMainWindow, WindowMixin):
         for imgPath in self.mImgList:
             item = QListWidgetItem(imgPath)
             self.fileListWidget.addItem(item)
-
-    def verifyImg(self, _value=False):
-        # Proceding next image without dialog if having any label
-        if self.filePath is not None:
-            try:
-                self.labelFile.toggleVerify()
-            except AttributeError:
-                # If the labelling file does not exist yet, create if and
-                # re-save it with the verified attribute.
-                self.saveFile()
-                if self.labelFile != None:
-                    self.labelFile.toggleVerify()
-                else:
-                    return
-
-            self.canvas.verified = self.labelFile.verified
-            self.paintCanvas()
-            self.saveFile()
 
     def openPrevImg(self, _value=False):
         # Proceding prev image without dialog if having any label
@@ -1696,7 +1569,7 @@ class MainWindow(QMainWindow, WindowMixin):
             return
         path = os.path.dirname(ustr(self.filePath)) if self.filePath else '.'
         formats = ['*.%s' % fmt.data().decode("ascii").lower() for fmt in QImageReader.supportedImageFormats()]
-        filters_2d = "Image & Label files (%s)" % ' '.join(formats + ['*%s' % LabelFile.suffix])
+        filters_2d = "Image files (%s)" % ' '.join(formats)
         filters_3d = "Medical image (%s)" % ' '.join(['*%s' % x for x in self.get3dformats()])
         filters = ";;".join([filters_3d, filters_2d])
         filename = QFileDialog.getOpenFileName(self, '%s - Choose Image or Label file' % __appname__, path, filters)
@@ -1723,22 +1596,25 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def saveFileAs(self, _value=False):
         assert not self.image.isNull(), "cannot save empty image"
-        self._saveFile(self.saveFileDialog())
+        annoPath = self.saveFileDialog()
+        if annoPath:
+            self.defaultSaveDir = os.path.dirname(annoPath)
+            self._saveFile(annoPath)
 
     def saveFileDialog(self, removeExt=True):
         caption = '%s - Choose File' % __appname__
-        filters = 'File (*%s)' % LabelFile.suffix
-        openDialogPath = self.currentPath()
+        filters = 'CXML (*%s)' % LabelFile.suffix
+        openDialogPath = self.defaultSaveDir
         dlg = QFileDialog(self, caption, openDialogPath, filters)
         dlg.setDefaultSuffix(LabelFile.suffix[1:])
         dlg.setAcceptMode(QFileDialog.AcceptSave)
-        filenameWithoutExtension = os.path.splitext(self.filePath)[0]
+        filenameWithoutExtension = self.filePath.split(".")[0]
         dlg.selectFile(filenameWithoutExtension)
         dlg.setOption(QFileDialog.DontUseNativeDialog, False)
         if dlg.exec_():
             fullFilePath = ustr(dlg.selectedFiles()[0])
             if removeExt:
-                return os.path.splitext(fullFilePath)[0] # Return file path without the extension.
+                return os.path.splitext(fullFilePath)[0]  # Return file path without the extension.
             else:
                 return fullFilePath
         return ''
@@ -1831,39 +1707,12 @@ class MainWindow(QMainWindow, WindowMixin):
                     else:
                         self.labelHist.append(line)
 
-    def loadPascalXMLByFilename(self, xmlPath):
-        if self.filePath is None:
-            return
-        if os.path.isfile(xmlPath) is False:
-            return
-
-        self.set_format(FORMAT_PASCALVOC)
-
-        tVocParseReader = PascalVocReader(xmlPath)
-        shapes = tVocParseReader.getShapes()
-        self.loadLabels(shapes)
-        self.canvas.verified = tVocParseReader.verified
-
-    def loadYOLOTXTByFilename(self, txtPath):
-        if self.filePath is None:
-            return
-        if os.path.isfile(txtPath) is False:
-            return
-
-        self.set_format(FORMAT_YOLO)
-        tYoloParseReader = YoloReader(txtPath, self.image)
-        shapes = tYoloParseReader.getShapes()
-        print(shapes)
-        self.loadLabels(shapes)
-        self.canvas.verified = tYoloParseReader.verified
-
     def loadCommonXMLByFilename(self, cxmlPath):
         if self.filePath is None:
             return
         if os.path.isfile(cxmlPath) is False:
             return
-            
-        self.set_format(FORMAT_COMMON)
+
         tCommonParserReader = CommonReader(cxmlPath)
         shapes = tCommonParserReader.getShapes()
         self.loadLabels(shapes)
@@ -1899,8 +1748,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if isinstance(image, np.ndarray):
             self.image = image
         else:
-            self.image = self.i3d.at(self.idx, self.axis,
-                                    self.segShowCheckBox.isChecked(), self.segShowLiverCheckBox.isChecked())
+            self.image = self.i3d.at(self.idx, self.axis, self.segShowCheckBox.isChecked())
         self.sliceNumber.setText("Slice: {:3d} / Total: {:3d}".format(self.idx, self.i3d.shape[self.axis]))
         self.canvas.loadPixmap(QPixmap.fromImage(self.image))
 
@@ -1916,81 +1764,38 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def segRun(self):
         segAlg = self.segAlgComboBox.currentText()
-        if self.i3d is not None and segAlg in [self.segAlg[0], self.segAlg[5], self.segAlg[7]]:
+        if self.i3d is not None:
             start = time.time()
             name = self.segName[self.segAlg.index(segAlg)]
             centers = {"fg": [], "bg": []}
             stddevs = {"fg": [], "bg": []}
-            for shape in self.canvas.shapes:
-                if shape.type_ == Shape.POINT:
-                    key = "fg" if shape.fg else "bg"
-                    centers[key].append([shape.points[0].y(), shape.points[0].x()])
-                    stddevs[key].append([5., 5.] if shape.fg else [5., 5.])
-                elif shape.type_ == Shape.ELLIPSE:
-                    key = "fg" if shape.fg else "bg"
-                    x, y, w, h = shape.rect()
-                    center, stddev = compute_robust_moments([int(x), int(y), int(w), int(h)], self.i3d.shape[1:])
-                    centers[key].append(center)
-                    stddevs[key].append(stddev)
-            if len(centers["bg"]) == 0:
-                centers, stddevs = centers["fg"], stddevs["fg"]
-            success = self.i3d.gunet(self.idx, centers=centers, stddevs=stddevs, name=name)
-            diff = time.time() - start
-            if success:
-                self.updateCanvasImage()
-                self.segAlgButtonUndo.setEnabled(True)
-                self.segAlgButtonClear.setEnabled(True)
-                self.total_time += diff
-            elif success is None:
-                QMessageBox.critical(self, "Error", "Please select correct segmentation method.",
-                                     QMessageBox.Yes)
-        elif segAlg in self.segAlg[1:3] + self.segAlg[6:7]:
-            start = time.time()
-            name = self.segName[self.segAlg.index(segAlg)]
-            centers = {"fg": [], "bg": []}
-            stddevs = {"fg": [], "bg": []}
+            bbox = [None] * 6
             for key, shapes in self.canvas.shapes_3d.items():
                 for shape in shapes:
+                    if shape.type_ == Shape.RECTANGLE:
+                        x1, y1, w, h = shape.rect()
+                        bbox[0] = int(shape.z1)
+                        bbox[1] = int(y1)
+                        bbox[2] = int(x1)
+                        bbox[3] = int(shape.z2) + 1
+                        bbox[4] = int(y1 + h)
+                        bbox[5] = int(x1 + w)
                     if shape.type_ == Shape.POINT:
                         k = "fg" if shape.fg else "bg"
-                        centers[k].append([DSKey.key2ds(key)[1], shape.points[0].y(), shape.points[0].x()])
+                        centers[k].append([int(DSKey.key2ds(key)[1]), int(shape.points[0].y()), int(shape.points[0].x())])
                         stddevs[k].append([3., 5., 5.])
-                    elif shape.type_ == Shape.ELLIPSE:
-                        k = "fg" if shape.fg else "bg"
-                        x, y, w, h = shape.rect()
-                        center, stddev = compute_robust_moments([int(x), int(y), int(w), int(h)], self.i3d.shape[1:])
-                        centers[k].append([DSKey.key2ds(key)[1]] + list(center))
-                        stddevs[k].append([3.] + list(stddev))
-            success = self.i3d.gnnu3d(name, centers, stddevs)
+            if segAlg == self.segAlg[0]:
+                success = self.i3d.seg_test(bbox, centers, stddevs)
+            elif segAlg == self.segAlg[1]:
+                success = self.i3d.seg_gc(centers)
             diff = time.time() - start
-            if success:
+            if success == 0:
                 self.updateCanvasImage()
                 self.segAlgButtonUndo.setEnabled(True)
                 self.segAlgButtonClear.setEnabled(True)
                 self.total_time += diff
-            elif success is None:
-                QMessageBox.critical(self, "Error", "Please select correct segmentation method.",
-                                     QMessageBox.Yes)
-        elif self.i3d is not None and segAlg in self.segAlg[3:5]:
-            name = self.segName[self.segAlg.index(segAlg)]
-            centers, stddevs = [], []
-            for shape in self.canvas.shapes:
-                if shape.type_ == Shape.POINT:
-                    centers.append([shape.points[0].y(), shape.points[0].x()])
-                    stddevs.append([4., 4.])
-                elif shape.type_ == Shape.ELLIPSE:
-                    x, y, w, h = shape.rect()
-                    center, stddev = compute_robust_moments([int(x), int(y), int(w), int(h)], self.i3d.shape[1:])
-                    centers.append(center)
-                    stddevs.append(stddev)
-            success = self.i3d.gnnu2d(name=name, i=self.idx, centers=centers, stddevs=stddevs)
-            if success:
-                self.updateCanvasImage()
-                self.segAlgButtonUndo.setEnabled(True)
-                self.segAlgButtonClear.setEnabled(True)
-            elif success is None:
-                QMessageBox.critical(self, "Error", "Please select correct segmentation method.",
-                                     QMessageBox.Yes)
+            else:
+                QMessageBox.critical(self, "Error", "Please select correct segmentation method.", QMessageBox.Yes)
 
     def segClear(self):
         if self.i3d is not None and self.idx in self.i3d.segCache:
@@ -1998,7 +1803,6 @@ class MainWindow(QMainWindow, WindowMixin):
             self.updateCanvasImage()
         elif self.i3d is not None and isinstance(self.i3d.segCache, np.ndarray):
             self.i3d.backup = self.i3d.segCache
-            self.i3d.backup_idx = Image3d.BK_SECOND
             self.i3d.segCache = {}
             self.segAlgButtonClear.setEnabled(False)
             self.updateCanvasImage()
@@ -2006,9 +1810,9 @@ class MainWindow(QMainWindow, WindowMixin):
     def segUndo(self):
         if self.i3d is not None:
             res = self.i3d.undo()
-            if res == Image3d.BK_DEFAULT:
+            if res:
                 self.segAlgButtonUndo.setEnabled(False)
-            self.updateCanvasImage()
+                self.updateCanvasImage()
 
     def segSave(self):
         if self.i3d is not None and len(self.i3d.segCache) > 0:
@@ -2019,23 +1823,23 @@ class MainWindow(QMainWindow, WindowMixin):
                 #     idx = int(self.labelTable.item(i, 1).text())
                 #     if idx == self.idx:
                 #         count += 1
-                saveFile = self.saveSegDialog("-{}-{}-lab".format(self.labelTable.rowCount(),
-                                                                  int(self.total_time * 1000)), removeExt=True)
+                saveFile = self.saveSegDialog("", removeExt=False)
                 if saveFile:
+                    self.defaultSegDir = os.path.dirname(saveFile)
                     if isinstance(self.i3d.segCache, dict):
                         seg = np.zeros(self.i3d.shape, dtype=np.uint8)
                         for i in self.i3d.segCache:
                             seg[i] = self.i3d.segCache[i]
                     else:
                         seg = self.i3d.segCache
-                    write_nii(seg, self.i3d.meta.meta, saveFile + ".nii.gz")
+                    write_nii(seg, self.i3d.meta.meta, saveFile)
 
     def saveSegDialog(self, suffix, removeExt=True):
         caption = '%s - Choose File' % __appname__
-        filters = 'File (*.nii.gz)'
-        openDialogPath = self.currentPath()
+        filters = 'Segmentation (*.nii.gz)'
+        openDialogPath = self.currentPath() if self.defaultSegDir is None else self.defaultSegDir
         dlg = QFileDialog(self, caption, openDialogPath, filters)
-        dlg.setDefaultSuffix(".png")
+        dlg.setDefaultSuffix("nii.gz")
         dlg.setAcceptMode(QFileDialog.AcceptSave)
         filenameWithoutExtension = os.path.basename(self.filePath).split(".")[0] + suffix
         dlg.selectFile(filenameWithoutExtension)
@@ -2043,7 +1847,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if dlg.exec_():
             fullFilePath = ustr(dlg.selectedFiles()[0])
             if removeExt:
-                return os.path.splitext(fullFilePath)[0] # Return file path without the extension.
+                return os.path.splitext(fullFilePath)[0]  # Return file path without the extension.
             else:
                 return fullFilePath
         return ''
@@ -2075,23 +1879,37 @@ class MainWindow(QMainWindow, WindowMixin):
             self.i3d.alpha = value
             self.updateCanvasImage()
 
-    def computeDice(self, y, x):
-        ref_file = os.path.join(os.path.dirname(self.filePath), os.path.basename(self.filePath).replace("volume", "segmentation"))
-        _, ref = read_nii(ref_file, out_dtype=np.uint8)
-        if ref.shape[0] == 21:
-            ref = ref[:20]
-        lab = self.i3d.segLabel if hasattr(self.i3d, "segLabel") else self.i3d.segCache
-        if isinstance(lab, np.ndarray) and lab.shape[0] == 21:
-            lab = lab[:20]
-        dice = computeDice(ref, lab, self.idx, int(y), int(x), True if hasattr(self.i3d, "segLabel") else False)
+    def computeDiceClicked(self):
+        if len(self.i3d.segCache) == 0:
+            return
+        if self.ref is None:
+            ref_file = os.path.join(os.path.dirname(self.filePath),
+                                    os.path.basename(self.filePath).replace("img", "mask"))
+            _, self.ref = read_nii(ref_file, out_dtype=np.uint8)
+
+        # get bbox
+        bbox = (slice(None), slice(None), slice(None))
+        find = False
+        for _, shapes in self.canvas.shapes_3d.items():
+            for shape in shapes:
+                if shape.type_ == Shape.RECTANGLE and self.canvas.isVisible(shape):
+                    x1, y1, w, h = shape.rect()
+                    bbox = (slice(int(shape.z1), int(shape.z2 + 1)),
+                            slice(int(y1), int(y1 + h)),
+                            slice(int(x1), int(x1 + w)))
+                    find = True
+                    break
+            if find:
+                break
+        dice = computeDice(self.ref, self.i3d.segCache, bbox)
         QMessageBox.information(self, "Info", "Dice of {}: {}".format(os.path.basename(self.filePath), dice),
                                 QMessageBox.Yes)
 
-    def computeDiceStateChanged(self):
-        if self.segComputeDiceCheckBox.isChecked():
-            self.canvas.overrideCursor(Qt.PointingHandCursor)
-        else:
-            self.canvas.overrideCursor(Qt.ArrowCursor)
+    # def computeDiceStateChanged(self):
+    #     if self.segComputeDiceCheckBox.isChecked():
+    #         self.canvas.overrideCursor(Qt.PointingHandCursor)
+    #     else:
+    #         self.canvas.overrideCursor(Qt.ArrowCursor)
 
 
 def inverted(color):
@@ -2126,9 +1944,10 @@ def get_main_app(argv=[]):
 
 
 def main():
-    '''construct main app and run it'''
+    """construct main app and run it"""
     app, _win = get_main_app(sys.argv)
     return app.exec_()
+
 
 if __name__ == '__main__':
     sys.exit(main())

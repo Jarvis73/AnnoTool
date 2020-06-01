@@ -30,7 +30,8 @@ class HashableQListWidgetItem(QListWidgetItem):
 
 class HashableQTableWidgetItem(QTableWidgetItem):
 
-    def __init__(self, *args):
+    def __init__(self, col, *args):
+        self.col_ = col
         super(HashableQTableWidgetItem, self).__init__(*args)
 
     def __hash__(self):

@@ -50,12 +50,14 @@ class Shape(object):
     type_ = RECTANGLE
     bg_fill_color = DEFAULT_BG_FILL_COLOR
 
-    def __init__(self, label=None, line_color=None, difficult=False, paintLabel=False):
+    z1 = -1
+    z2 = -1
+
+    def __init__(self, label=None, line_color=None, paintLabel=False):
         self.label = label
         self.points = []
         self.fill = False
         self.selected = False
-        self.difficult = difficult
         self.paintLabel = paintLabel
 
         self._highlightIndex = None
@@ -220,7 +222,6 @@ class Shape(object):
             shape.line_color = self.line_color
         if self.fill_color != Shape.fill_color:
             shape.fill_color = self.fill_color
-        shape.difficult = self.difficult
         return shape
 
     def __len__(self):
@@ -236,10 +237,10 @@ class Shape(object):
 class Point(Shape):
     vertex_fill_color = DEFAULT_POINT_FILL_COLOR
 
-    def __init__(self, label=None, difficult=False, paintLabel=False, foreground=True):
+    def __init__(self, label=None, paintLabel=False, foreground=True):
         self.type_ = Shape.POINT
         self.fg = foreground
-        super(Point, self).__init__(label, None, difficult, paintLabel)
+        super(Point, self).__init__(label, None, paintLabel)
         
     def paint(self, painter):
         if self.points:
@@ -302,10 +303,10 @@ class Point(Shape):
 
 
 class Ellipse(Shape):
-    def __init__(self, label=None, line_color=None, difficult=False, paintLabel=False, foreground=True):
+    def __init__(self, label=None, line_color=None, paintLabel=False, foreground=True):
         self.type_ = Shape.ELLIPSE
         self.fg = foreground
-        super(Ellipse, self).__init__(label, line_color, difficult, paintLabel)
+        super(Ellipse, self).__init__(label, line_color, paintLabel)
 
     def paint(self, painter:QPainter):
         if self.points:

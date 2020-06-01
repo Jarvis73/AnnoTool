@@ -88,24 +88,21 @@ class CommonWriter:
         segmented.text = '0'
         return top
 
-    def addBndBox(self, xmin, ymin, xmax, ymax, name, difficult, **kwargs):
+    def addBndBox(self, xmin, ymin, xmax, ymax, name, **kwargs):
         bndbox = {'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}
         bndbox['name'] = name
-        bndbox['difficult'] = difficult
         bndbox.update(kwargs)
         self.boxlist.append(bndbox)
 
-    def addEllipseBox(self, xmin, ymin, xmax, ymax, name, difficult, **kwargs):
+    def addEllipseBox(self, xmin, ymin, xmax, ymax, name, **kwargs):
         bndbox = {'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}
         bndbox['name'] = name
-        bndbox['difficult'] = difficult
         bndbox.update(kwargs)
         self.elllist.append(bndbox)
 
-    def addPnt(self, x, y, name, difficult, **kwargs):
+    def addPnt(self, x, y, name, **kwargs):
         pnt = {'x': x, 'y': y}
         pnt['name'] = name
-        pnt['difficult'] = difficult
         pnt.update(kwargs)
         self.pntlist.append(pnt)
 
@@ -132,12 +129,16 @@ class CommonWriter:
             xmax.text = str(each_object['xmax'])
             ymax = SubElement(bndbox, 'ymax')
             ymax.text = str(each_object['ymax'])
+            zmin = SubElement(bndbox, "zmin")
+            zmin.text = str(each_object["z1"])
+            zmax = SubElement(bndbox, "zmax")
+            zmax.text = str(each_object["z2"])
             if "axis" in each_object:
                 axis = SubElement(bndbox, "axis")
                 axis.text = str(each_object["axis"])
             if "slice" in each_object:
-                axis = SubElement(bndbox, "slice")
-                axis.text = str(each_object["slice"])
+                slice = SubElement(bndbox, "slice")
+                slice.text = str(each_object["slice"])
 
     def appendObjects(self, top):
         self.savebox(top, self.boxlist, 'bndbox')
@@ -156,12 +157,14 @@ class CommonWriter:
             x.text = str(each_object['x'])
             y = SubElement(pnt, 'y')
             y.text = str(each_object['y'])
+            fg = SubElement(pnt, 'fg')
+            fg.text = str(each_object['fg'])
             if "axis" in each_object:
                 axis = SubElement(pnt, "axis")
                 axis.text = str(each_object["axis"])
             if "slice" in each_object:
-                axis = SubElement(pnt, "slice")
-                axis.text = str(each_object["slice"])
+                slice = SubElement(pnt, "slice")
+                slice.text = str(each_object["slice"])
 
     def save(self, targetFile=None):
         root = self.genXML()
@@ -197,8 +200,10 @@ class CommonReader:
     def addBndBox(self, label, bndbox, dtype):
         xmin = int(float(bndbox.find('xmin').text))
         ymin = int(float(bndbox.find('ymin').text))
+        zmin = int(float(bndbox.find('zmin').text))
         xmax = int(float(bndbox.find('xmax').text))
         ymax = int(float(bndbox.find('ymax').text))
+        zmax = int(float(bndbox.find('zmax').text))
         points = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
 
         shape = {
@@ -207,7 +212,8 @@ class CommonReader:
             "shape": points,
             "color1": None,
             "color2": None,
-            "difficult": 0
+            "z1": zmin,
+            "z2": zmax
         }
 
         axis = bndbox.find("axis")
@@ -231,7 +237,7 @@ class CommonReader:
             "shape": points,
             "color1": None,
             "color2": None,
-            "difficult": 0
+            "fg": pnt.find('fg').text == "True"
         }
 
         axis = pnt.find("axis")

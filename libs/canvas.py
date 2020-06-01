@@ -29,7 +29,6 @@ class Canvas(QWidget):
     shapeMoved = pyqtSignal()
     drawingPolygon = pyqtSignal(bool)
     sliceChangeRequest = pyqtSignal(int)    # for 3d image
-    computeDiceRequest = pyqtSignal(int, int)
 
     CREATE, EDIT = list(range(2))
 
@@ -178,17 +177,6 @@ class Canvas(QWidget):
             self.repaint()
             return
 
-        # Polygon copy moving.
-        if Qt.RightButton & ev.buttons():
-            if self.selectedShapeCopy and self.prevPoint:
-                self.overrideCursor(CURSOR_MOVE)
-                self.boundedMoveShape(self.selectedShapeCopy, pos)
-                self.repaint()
-            elif self.selectedShape:
-                self.selectedShapeCopy = self.selectedShape.copy()
-                self.repaint()
-            return
-
         # Polygon/Vertex moving.
         if Qt.LeftButton & ev.buttons():
             if self.selectedVertex():
@@ -233,57 +221,52 @@ class Canvas(QWidget):
                     self.overrideCursor(CURSOR_POINT)
                     self.update()
                     break
-            elif shape.containsPoint(pos):
-                if self.selectedVertex():
-                    self.hShape.highlightClear()
-                self.hVertex, self.hShape = None, shape
-                self.setToolTip(
-                    "Click & drag to move shape '%s'" % shape.label)
-                self.setStatusTip(self.toolTip())
-                self.overrideCursor(CURSOR_GRAB)
-                self.update()
-                break
+            # elif shape.containsPoint(pos):
+            #     if self.selectedVertex():
+            #         self.hShape.highlightClear()
+            #     self.hVertex, self.hShape = None, shape
+            #     self.setToolTip(
+            #         "Click & drag to move shape '%s'" % shape.label)
+            #     self.setStatusTip(self.toolTip())
+            #     self.overrideCursor(CURSOR_GRAB)
+            #     self.update()
+            #     break
         else:  # Nothing found, clear highlights, reset state.
             if self.hShape and (self.hShape.type_ != Shape.POINT or not self.hShape.selected):
                 self.hShape.highlightClear()
                 self.update()
             self.hVertex, self.hShape, self.hPoint = None, None, None
-            if not self.parent().window().segComputeDiceCheckBox.isChecked():
-                self.overrideCursor(CURSOR_DEFAULT)
 
     def mousePressEvent(self, ev):
         pos = self.transformPos(ev.pos())
-        if self.parent().window().segComputeDiceCheckBox.isChecked():
-            self.mouseDoubleClick(ev)
 
         if ev.button() == Qt.LeftButton:
             if self.drawing():
                 if self._drawType in [Shape.RECTANGLE, Shape.ELLIPSE]:
                     self.handleDrawingRec(pos)
                 elif self._drawType == Shape.POINT:
-                    self.handleDrawingPoint(pos)
+                    self.handleDrawingPoint(pos, fg=True)
                 else:
                     raise NotImplementedError
             else:
                 self.selectShapePoint(pos)
                 self.prevPoint = pos
                 self.repaint()
-        elif ev.button() == Qt.RightButton and self.editing():
-            self.selectShapePoint(pos)
-            self.prevPoint = pos
-            self.repaint()
-
+        elif ev.button() == Qt.RightButton:
+            if self.drawing():
+                if self._drawType in [Shape.RECTANGLE, Shape.ELLIPSE]:
+                    self.handleDrawingRec(pos)
+                elif self._drawType == Shape.POINT:
+                    self.handleDrawingPoint(pos, fg=False)
+                else:
+                    raise NotImplementedError
+            else:
+                self.selectShapePoint(pos)
+                self.prevPoint = pos
+                self.repaint()
 
     def mouseReleaseEvent(self, ev):
-        if ev.button() == Qt.RightButton:
-            menu = self.menus[bool(self.selectedShapeCopy)]
-            self.restoreCursor()
-            if not menu.exec_(self.mapToGlobal(ev.pos()))\
-               and self.selectedShapeCopy:
-                # Cancel the move by deleting the shadow copy.
-                self.selectedShapeCopy = None
-                self.repaint()
-        elif ev.button() == Qt.LeftButton and self.selectedShape:
+        if self.selectedShape:
             if self.selectedVertex():
                 self.overrideCursor(CURSOR_POINT)
             else:
@@ -294,21 +277,22 @@ class Canvas(QWidget):
                 if self._drawType in [Shape.RECTANGLE, Shape.ELLIPSE]:
                     self.handleDrawingRec(pos)
                 elif self._drawType == Shape.POINT:
-                    self.handleDrawingPoint(pos)
+                    self.handleDrawingPoint(pos, fg=True)
                 else:
                     raise NotImplementedError
-
-    def mouseDoubleClick(self, ev):
-        pos = self.transformPos(ev.pos())
-        if ev.button() == Qt.LeftButton:
-            self.computeDiceRequest.emit(pos.y(), pos.x())
-        self.start = 0
+        elif ev.button() == Qt.RightButton:
+            pos = self.transformPos(ev.pos())
+            if self.drawing():
+                if self._drawType in [Shape.RECTANGLE, Shape.ELLIPSE]:
+                    self.handleDrawingRec(pos)
+                elif self._drawType == Shape.POINT:
+                    self.handleDrawingPoint(pos, fg=False)
+                else:
+                    raise NotImplementedError
 
     def endMove(self, copy=False):
         assert self.selectedShape and self.selectedShapeCopy
         shape = self.selectedShapeCopy
-        #del shape.fill_color
-        #del shape.line_color
         if copy:
             self.shapes.append(shape)
             self.selectedShape.selected = False
@@ -352,11 +336,11 @@ class Canvas(QWidget):
             self.drawingPolygon.emit(True)
             self.update()
 
-    def handleDrawingPoint(self, pos):
+    def handleDrawingPoint(self, pos, fg):
         if self.current:
             self.finalise()
         elif not self.outOfPixmap(pos):
-            self.current = Point(foreground=not self.parent().window().segBgCheckBox.checkState())
+            self.current = Point(foreground=fg)
             self.current.addPoint(pos)
             self.line_r.points.clear()
             self.line_e.points.clear()
