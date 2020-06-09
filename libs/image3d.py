@@ -16,6 +16,7 @@ from collections import OrderedDict
 import subprocess
 
 from libs import image_np_ops
+from libs.graph_cut import graph_cut3d
 
 
 class Image3d(object):
@@ -38,7 +39,7 @@ class Image3d(object):
             self.shape = self.meta.shape
             self.low = 0
             self.high = 0
-        self.axis = 0		# 0, 1, 2
+        self.axis = 0  # 0, 1, 2
 
         self.segCache = {}
         # if filePath:
@@ -308,6 +309,22 @@ class Image3d(object):
         os.remove(outfile)
         return 0
 
+    def seg_GraphCut(self, bbox, centers):
+        z1, y1, x1, z2, y2, x2 = bbox
+        seed = np.zeros_like(self.volume, np.uint8)
+        seg = np.zeros_like(self.volume, np.uint8)
+        for key, values in centers.items():
+            _type = 1 if key == 'fg' else 2
+            for point in values:
+                seed[point[0]][point[1]][point[2]] = _type
+            # print(1)
+        box_volume = self.volume[z1:z2 + 1, y1:y2 + 1, x1:x2 + 1]
+        box_seed = seed[z1:z2 + 1, y1:y2 + 1, x1:x2 + 1]
+        box_seg = 1 - graph_cut3d(box_volume, box_seed)
+        seg[z1:z2 + 1, y1:y2 + 1, x1:x2 + 1] = box_seg
+        self.segCache = seg
+        return 0
+
 
 class Header(object):
     def __init__(self, meta, format):
@@ -375,11 +392,11 @@ def read_nii(file_name, out_dtype=np.int16, only_header=False):
     trans = np.argmax(np.abs(affine[:3, :3]), axis=1)
     data = nib_vol.get_fdata().astype(out_dtype).transpose(*trans[::-1])
 
-    if affine[0, trans[0]] > 0:                # Increase x from Right to Left
+    if affine[0, trans[0]] > 0:  # Increase x from Right to Left
         data = np.flip(data, axis=2)
-    if affine[1, trans[1]] > 0:                # Increase y from Anterior to Posterior
+    if affine[1, trans[1]] > 0:  # Increase y from Anterior to Posterior
         data = np.flip(data, axis=1)
-    if affine[2, trans[2]] < 0:                # Increase z from Interior to Superior
+    if affine[2, trans[2]] < 0:  # Increase z from Interior to Superior
         data = np.flip(data, axis=0)
     return vh, data
 

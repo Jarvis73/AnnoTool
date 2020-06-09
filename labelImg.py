@@ -1778,6 +1778,8 @@ class MainWindow(QMainWindow, WindowMixin):
                 success = self.i3d.seg_din(bbox, centers, stddevs, name, guide_type="geo")
             elif segAlg == "Random Walk 3D":
                 success = self.i3d.seg_RW(bbox, centers)
+            elif segAlg == "Graph Cut 3D":
+                success = self.i3d.seg_GraphCut(bbox, centers)
             else:
                 success = 1
             diff = time.time() - start
