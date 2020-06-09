@@ -23,7 +23,7 @@ DEFAULT_VERTEX_FILL_COLOR = QColor(0, 255, 0, 255)
 DEFAULT_HVERTEX_FILL_COLOR = QColor(255, 0, 0)
 MIN_Y_LABEL = 10
 DEFAULT_POINT_FILL_COLOR = QColor(255, 0, 0)
-DEFAULT_BG_FILL_COLOR = QColor(255, 0, 255)
+DEFAULT_BG_FILL_COLOR = QColor(0, 0, 255)
 
 
 class Shape(object):
@@ -34,7 +34,7 @@ class Shape(object):
     MOVE_VERTEX, NEAR_VERTEX = range(2)
     
     # Define shape types
-    RECTANGLE, POINT, ELLIPSE = range(3)
+    RECTANGLE, POINT = range(2)
     
     # The following class variables influence the drawing
     # of _all_ shape objects.
@@ -300,53 +300,3 @@ class Point(Shape):
             path.addEllipse(point, d / 2.0, d / 2.0)
         else:
             assert False, "unsupported vertex shape"
-
-
-class Ellipse(Shape):
-    def __init__(self, label=None, line_color=None, paintLabel=False, foreground=True):
-        self.type_ = Shape.ELLIPSE
-        self.fg = foreground
-        super(Ellipse, self).__init__(label, line_color, paintLabel)
-
-    def paint(self, painter:QPainter):
-        if self.points:
-            color = self.select_line_color if self.selected else (self.line_color if self.fg else self.bg_fill_color)
-
-            pen = QPen(color)
-            # Try using integer sizes for smoother drawing(?)
-            pen.setWidth(max(1, int(round(2.0 / self.scale))))
-            painter.setPen(pen)
-
-            if self.selected:
-                vrtx_path = QPainterPath()
-                for i, p in enumerate(self.points):
-                    self.drawVertex(vrtx_path, i)
-                painter.drawPath(vrtx_path)
-                painter.fillPath(vrtx_path, self.vertex_fill_color)
-
-            if self.fill:
-                color = self.select_fill_color if self.selected else self.fill_color
-                brush = QBrush(color)
-                ori_brush = painter.brush()
-                painter.setBrush(brush)
-            painter.drawEllipse(*self.rect())
-            if self.fill:
-                painter.setBrush(ori_brush)
-
-            # Draw text at the top-left
-            if self.paintLabel:
-                min_x = sys.maxsize
-                min_y = sys.maxsize
-                for point in self.points:
-                    min_x = min(min_x, point.x())
-                    min_y = min(min_y, point.y())
-                if min_x != sys.maxsize and min_y != sys.maxsize:
-                    font = QFont()
-                    font.setPointSize(8)
-                    font.setBold(True)
-                    painter.setFont(font)
-                    if (self.label == None):
-                        self.label = ""
-                    if (min_y < MIN_Y_LABEL):
-                        min_y += MIN_Y_LABEL
-                    painter.drawText(min_x, min_y, self.label)

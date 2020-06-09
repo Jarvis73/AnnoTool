@@ -94,12 +94,6 @@ class CommonWriter:
         bndbox.update(kwargs)
         self.boxlist.append(bndbox)
 
-    def addEllipseBox(self, xmin, ymin, xmax, ymax, name, **kwargs):
-        bndbox = {'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax}
-        bndbox['name'] = name
-        bndbox.update(kwargs)
-        self.elllist.append(bndbox)
-
     def addPnt(self, x, y, name, **kwargs):
         pnt = {'x': x, 'y': y}
         pnt['name'] = name
@@ -142,7 +136,6 @@ class CommonWriter:
 
     def appendObjects(self, top):
         self.savebox(top, self.boxlist, 'bndbox')
-        self.savebox(top, self.elllist, 'ellipse')
 
         for each_object in self.pntlist:
             object_item = SubElement(top, 'object')
@@ -268,11 +261,6 @@ class CommonReader:
             bndbox = object_iter.find("bndbox")
             if bndbox is not None:
                 self.addBndBox(label, bndbox, Shape.RECTANGLE)
-                continue
-
-            ellipse = object_iter.find("ellipse")
-            if ellipse is not None:
-                self.addBndBox(label, ellipse, Shape.ELLIPSE)
                 continue
             
             pnt = object_iter.find("pnt")

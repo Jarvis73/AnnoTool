@@ -39,8 +39,6 @@ This repository is originally forked from `tzutalin/labelImg <https://github.com
 
 - Point
 
-- Ellipse
-
 All kinds of the annotations should be saved to `Common` format. Original `PascalVOC` and `YOLO` are only suitable for bounding box annotations.
 
 Supported image types:

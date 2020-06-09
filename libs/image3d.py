@@ -1,3 +1,4 @@
+import os
 import cv2
 import grpc
 import numpy as np
@@ -6,24 +7,27 @@ import qimage2ndarray as q2a
 import skimage.measure as measure
 from skimage import feature
 from skimage._shared import utils as skutils
-# import tensorflow as tf
-# from tensorflow_serving.apis import predict_pb2, prediction_service_pb2_grpc
+import tensorflow as tf
+from tensorflow_serving.apis import predict_pb2, prediction_service_pb2_grpc
 import matplotlib.pyplot as plt
 from scipy import ndimage as ndi
 from pathlib import Path
 from collections import OrderedDict
-from libs.graph_cut import GraphCut3D
+import subprocess
+
+from libs import image_np_ops
 
 
 class Image3d(object):
     """ For 3D gray image """
 
-    def __init__(self, volume, meta=None, filePath=None):
+    def __init__(self, volume, meta=None, filePath=None, label=None):
         # self.raw = raw
         # self.volume = raw.copy()
         if volume is None and meta is None:
             raise ValueError("Both `volume` and `meta` are None.")
         self.volume = volume
+        self.label = label
         self.filePath = filePath
         self.meta = meta
         if volume is not None:
@@ -46,7 +50,8 @@ class Image3d(object):
         #         self.segCache = np.clip(self.segLabel, 0, 1)
 
         self._alpha = 0.5
-        self._color = np.array([0, 255, 0])
+        self._color = np.array([255, 255, 0])
+        self._colorGT = np.array([255, 0, 0])
         self.contour = False
         self.backup = None
         self.guide_temp = None
@@ -61,6 +66,14 @@ class Image3d(object):
     @color.setter
     def color(self, color_):
         self._color = np.array(color_)
+
+    @property
+    def colorGT(self):
+        return self._colorGT
+
+    @colorGT.setter
+    def colorGT(self, color_):
+        self._colorGT = np.array(color_)
 
     @property
     def alpha(self):
@@ -86,7 +99,7 @@ class Image3d(object):
         if high is not None and isinstance(high, (int, float)) and self.high != high:
             self.high = high
 
-    def at(self, i, axis=0, show=True):
+    def at(self, i, axis=0, showSeg=True, showLab=False):
         # We don't check index out of bounds
         if axis == 0:
             img = self.volume[i]
@@ -95,13 +108,22 @@ class Image3d(object):
         elif axis == 2:
             img = self.volume[:, :, i]
 
-        if not show or len(self.segCache) == 0 or (isinstance(self.segCache, dict) and i not in self.segCache):
-            return q2a.gray2qimage(img, normalize=(self.low, self.high))
-        else:
+        img = np.repeat(img[..., None], 3, axis=2)
+        img = ((img - self.low) / (self.high - self.low) * 255).astype(np.uint8)
+        if showLab:
+            obj = self.label[i]
+            if not self.contour:
+                px = np.where(obj)
+                img[px[0], px[1]] = (1 - self._alpha) * img[px[0], px[1]] + self._alpha * self._colorGT
+            else:
+                contours = measure.find_contours(obj, 0.5)
+                for cont in contours:
+                    cont = cont.astype(np.int16)
+                    img[cont[:, 0], cont[:, 1]] = self._colorGT
+        if showSeg and len(self.segCache) != 0:
             obj = self.segCache[i]
             if self.segCache[i].max() > 1:
                 obj = np.clip(self.segCache[i], 0, 1)
-            img = np.repeat(img[..., None], 3, axis=2)
             if not self.contour:
                 px = np.where(obj)
                 img[px[0], px[1]] = (1 - self._alpha) * img[px[0], px[1]] + self._alpha * self._color
@@ -110,7 +132,7 @@ class Image3d(object):
                 for cont in contours:
                     cont = cont.astype(np.int16)
                     img[cont[:, 0], cont[:, 1]] = self._color
-            return q2a.array2qimage(img, normalize=(self.low, self.high))
+        return q2a.array2qimage(img)
 
     def pixel(self, slice_idx, i, j, axis=0):
         if axis == 0:
@@ -128,6 +150,87 @@ class Image3d(object):
             return True
         return False
 
+    def preprocess(self, bbox, centers, stddevs, guide_type="exp"):
+        z1, y1, x1, z2, y2, x2 = bbox
+        # Image
+        patch = self.volume[z1:z2, y1:y2, x1:x2]
+        patch = image_np_ops.z_score(patch)
+        p1, p2, p3 = 0, 0, 0
+        if y2 - y1 > 960 or x2 - x1 > 320:
+            zoom_scale = np.array([1, 960 / patch.shape[1], 320 / patch.shape[2]])
+            patch = ndi.zoom(patch, zoom_scale, order=1)
+            fg_pts = (np.array(centers['fg']).reshape(-1, 3) - [z1, y1, x1]) * zoom_scale
+            bg_pts = (np.array(centers['bg']).reshape(-1, 3) - [z1, y1, x1]) * zoom_scale
+            fg_std = np.array(stddevs['fg']).reshape(-1, 3) * zoom_scale
+            bg_std = np.array(stddevs['bg']).reshape(-1, 3) * zoom_scale
+        else:
+            if patch.shape[1] % 16 != 0:
+                p2 = (patch.shape[1] + 15) // 16 * 16 - patch.shape[1]
+            if patch.shape[2] % 16 != 0:
+                p3 = (patch.shape[2] + 15) // 16 * 16 - patch.shape[2]
+            fg_pts = np.array(centers['fg']).reshape(-1, 3) - [z1, y1, x1]
+            bg_pts = np.array(centers['bg']).reshape(-1, 3) - [z1, y1, x1]
+            fg_std = np.array(stddevs['fg']).reshape(-1, 3)
+            bg_std = np.array(stddevs['bg']).reshape(-1, 3)
+        if patch.shape[0] % 2 != 0:
+            p1 = 1
+        image = np.pad(patch, ((0, p1), (0, p2), (0, p3))).astype(np.float32)
+
+        print(fg_pts)
+        print(bg_pts)
+        if guide_type == "exp":
+            fg_gd = image_np_ops.gen_guide_nd(image.shape, fg_pts, fg_std)
+            bg_gd = image_np_ops.gen_guide_nd(image.shape, bg_pts, bg_std) * 1.5
+        elif guide_type == "euc":
+            fg_gd = image_np_ops.gen_guide_nd(image.shape, fg_pts, fg_std, euclidean=True)
+            bg_gd = image_np_ops.gen_guide_nd(image.shape, bg_pts, bg_std, euclidean=True) * 1.5
+        elif guide_type == "geo":
+            fg_gd = image_np_ops.gen_guide_geo_nd(image, fg_pts, lamb=1.0, iter_=2)
+            bg_gd = image_np_ops.gen_guide_geo_nd(image, bg_pts, lamb=1.0, iter_=2)
+        guide = np.stack((fg_gd, bg_gd), axis=-1).astype(np.float32)
+        return image[None, ..., None], guide[None]
+
+    def run_tf_serving(self, image, guide, name):
+        host = "localhost"
+        port = 8500
+        options = [('grpc.max_send_message_length', 50 * 1536 * 512 * 4),
+                   ('grpc.max_receive_message_length', 50 * 1536 * 512 * 4)]
+        channel = grpc.insecure_channel('{host}:{port}'.format(host=host, port=port), options=options)
+        stub = prediction_service_pb2_grpc.PredictionServiceStub(channel)
+
+        request = predict_pb2.PredictRequest()
+        request.model_spec.name = name
+        request.model_spec.signature_name = "serving_default"
+        request.inputs['image'].CopyFrom(tf.make_tensor_proto(image))
+        request.inputs['guide'].CopyFrom(tf.make_tensor_proto(guide))
+
+        try:
+            result = stub.Predict(request)
+        except Exception as e:
+            print(e)
+            result = None
+
+        # Reference:
+        # How to access nested values
+        # https://stackoverflow.com/questions/44785847/how-to-retrieve-float-val-from-a-predictresponse-object
+        # logits = np.array(result.outputs["output_bytes2"].float_val).reshape(height, width, 2)
+        if result is not None:
+            output = np.array(result.outputs["output_0"].float_val).reshape(*guide.shape)
+            output = output[0]
+            return output
+        else:
+            return None
+
+    def postprocess(self, mask):
+        struct = ndi.generate_binary_structure(3, 1)
+        labeled, n_objs = ndi.label(mask)
+        slices = ndi.find_objects(labeled)
+        for i, sli in enumerate(slices, start=1):
+            patch = labeled[sli] == i
+            if np.count_nonzero(patch) < 10:
+                labeled[sli] -= patch * i
+        return np.clip(labeled, 0, 1)
+
     def seg_test(self, bbox, centers, stddevs):
         z1, y1, x1, z2, y2, x2 = bbox
         seg = np.zeros_like(self.volume, np.uint8)
@@ -139,18 +242,70 @@ class Image3d(object):
         self.segCache = seg
         return 0
 
-    def seg_gc(self, centers):
-        gc = GraphCut3D(self.volume, [1, 1, 1])
-        seeds = np.zeros_like(self.volume, np.uint8)
-        fg = np.array(centers["fg"], np.int32).reshape(-1, 3)
-        bg = np.array(centers["bg"], np.int32).reshape(-1, 3)
-        if fg.shape[0] > 0:
-            seeds[fg[:, 0], fg[:, 1], fg[:, 2]] = 1
-        if bg.shape[0] > 0:
-            seeds[bg[:, 0], bg[:, 1], bg[:, 2]] = 1
-        gc.set_seeds(seeds)
-        gc.run()
-        self.segCache = gc.segmentation
+    def seg_din(self, bbox, centers, stddevs, name, guide_type="exp"):
+        z1, y1, x1, z2, y2, x2 = bbox
+        if z1 is None:
+            s = self.volume.shape
+            bbox = [0, 0, 0, s[0], s[1], s[2]]
+            z1, y1, x1, z2, y2, x2 = bbox
+        image, guide = self.preprocess(bbox, centers, stddevs, guide_type)
+        print(image.shape, guide.shape)
+        logits = self.run_tf_serving(image, guide, name=name)
+        if logits is None:
+            return 1
+        predict = np.argmax(logits, axis=-1)
+        if predict.shape[0] > z2 - z1:
+            predict = predict[:-1]
+        if y2 - y1 > 960 or x2 - x1 > 320:
+            zoom_scale = np.array([1, (y2 - y1) / 960, (x2 - x1) / 320])
+            seg = ndi.zoom(predict, zoom_scale, order=0)
+        else:
+            seg = np.zeros_like(self.volume, np.uint8)
+            seg[z1:z2, y1:y2, x1:x2] = predict[:z2 - z1, :y2 - y1, :x2 - x1]
+        self.segCache = self.postprocess(seg)
+        return 0
+
+    def seg_RW(self, bbox, centers):
+        fg_pts = np.array(centers["fg"], np.int32).reshape(-1, 3)
+        bg_pts = np.array(centers["bg"], np.int32).reshape(-1, 3)
+        if fg_pts.shape[0] == 0 or bg_pts.shape[0] == 0:
+            return 1
+        z1, y1, x1, z2, y2, x2 = bbox
+        if z1 is None:
+            s = self.volume.shape
+            bbox = [0, 0, 0, s[0], s[1], s[2]]
+            z1, y1, x1, z2, y2, x2 = bbox
+        fg_pts -= [z1, y1, x1]
+        bg_pts -= [z1, y1, x1]
+        patch = self.volume[z1:z2, y1:y2, x1:x2]
+        tmp_dir = Path(__file__).parent.parent / "temp"
+        infile = tmp_dir / "data.bin"
+        size = np.zeros(3, dtype='int16')
+        size[:] = patch.shape[:]
+        # Convert data to binary
+        with infile.open('wb') as inwrite:
+            size.tofile(inwrite)
+            patch.tofile(inwrite)
+        # Create point.txt
+        point_file = tmp_dir / "points.txt"
+        with point_file.open("w") as f:
+            f.write(f"{0},{patch.shape[0]},{0},{patch.shape[1]},{0},{patch.shape[2]}\n")
+            for pt in fg_pts:
+                f.write(f"1,{pt[0]},{pt[1]},{pt[2]}\n")
+            for pt in bg_pts:
+                f.write(f"0,{pt[0]},{pt[1]},{pt[2]}\n")
+            f.write("end")
+        # Perform Random Walker Segmentation
+        # subprocess.call(["./tools/RandomWalk-3D.exe", "./temp/data.bin", "./temp/out.bin", "./temp/points.txt"])
+        os.system(".\\tools\\RandomWalk-3D.exe .\\temp\\data.bin .\\temp\\out.bin .\\temp\\points.txt")
+        outfile = tmp_dir / "out.bin"
+        with outfile.open('rb') as binread:
+            shape = np.fromfile(binread, dtype=np.int16, count=3, sep='')
+            ctdata = np.fromfile(binread, dtype=np.int16, count=-1, sep='')
+            ctdata = ctdata.reshape(shape)
+        self.segCache = np.zeros_like(self.volume, np.uint8)
+        self.segCache[z1:z2, y1:y2, x1:x2] = ctdata
+        os.remove(outfile)
         return 0
 
 
@@ -200,7 +355,14 @@ def computeDice(ref, pred, bbox):
 def read3d(filePath, out_dtype=np.int16, only_header=False):
     if filePath.lower().endswith(('.nii', '.nii.gz')):
         hdr, volume = read_nii(filePath, out_dtype, only_header)
-        return Image3d(volume, Header(hdr, "nii"), filePath)
+        labPath = Path(filePath)
+        labPath = labPath.parent / labPath.name.replace("volume", "segmentation").replace("img", "mask")
+        if not only_header:
+            _, label = read_nii(labPath, out_dtype, only_header)
+            label = np.clip(label, 0, 1)
+        else:
+            label = None
+        return Image3d(volume, Header(hdr, "nii"), filePath, label)
 
 
 def read_nii(file_name, out_dtype=np.int16, only_header=False):
@@ -242,14 +404,3 @@ def write_nii(data, header, out_path, out_dtype=np.int16, affine=None):
     else:
         out = nib.Nifti1Image(out_image, affine=None, header=header)
     nib.save(out, str(out_path))
-
-
-def createEllipse(rect, shape):
-    x, y, w, h = rect
-    cy, cx = h // 2, w // 2
-    xrng = np.arange(w)
-    yrng = np.arange(h)
-    coord = np.stack(np.meshgrid(yrng, xrng, indexing="ij"), axis=-1)
-    ellipse_mask = np.zeros(shape, dtype=np.uint8)
-    ellipse_mask[y:y + h, x:x + w] = np.sum(((coord - [cy, cx]) / [cy, cx]) ** 2, axis=-1) <= 1
-    return ellipse_mask

@@ -145,12 +145,16 @@ class MainWindow(QMainWindow, WindowMixin):
         self.lowHighContainer.setLayout(lowHighQHBoxLayout)
         i3dSettingLayout.addWidget(self.lowHighContainer)
 
-        self.segResColor = QPushButton("Color")
-        self.segResColor.setStyleSheet("background-color: #00FF00; color: white")
+        self.segGTColor = QPushButton("GT Color")
+        self.segGTColor.setStyleSheet("background-color: #FF0000; color: white")
+        self.segGTColor.clicked.connect(self.segResColorPickerGT)
+        self.segResColor = QPushButton("Seg Color")
+        self.segResColor.setStyleSheet("background-color: #FFFF00; color: black")
         self.segResColor.clicked.connect(self.segResColorPicker)
         self.segResMode = QPushButton("Mask")
         self.segResMode.clicked.connect(self.segResModeChanged)
         segResLayout = QHBoxLayout()
+        segResLayout.addWidget(self.segGTColor)
         segResLayout.addWidget(self.segResColor)
         segResLayout.addWidget(self.segResMode)
         self.segResContainer = QWidget()
@@ -179,11 +183,16 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # segmentation algorithmDann
         segAlgLabel = QLabel(getStr("segAlgLabel"))
-        self.segAlg = ["Test", "!Graph Cut 3D", "!Random Walk 3D", "!Active Contour 3D", "!Deep Learning"]
-        self.segName = ["Test",  "GraphCut3D", "RandomWalk3D", "ActiveContour3D", "grpc_model"]
+        self.segAlg = ["DIN", "EDT", "GDT", "Graph Cut 3D", "Random Walk 3D"]
+        self.segName = ["din", "euc", "geo", "GraphCut3D", "RandomWalk3D"]
         self.segAlgComboBox = QComboBox()
         self.segAlgComboBox.addItems(self.segAlg)
-        self.segShowCheckBox = QCheckBox("Show Seg:")
+        self.gtShowCheckBox = QCheckBox("GT:")
+        self.gtShowCheckBox.setChecked(False)
+        self.gtShowCheckBox.setLayoutDirection(Qt.RightToLeft)
+        self.gtShowCheckBox.setShortcut(QKeySequence(Qt.Key_M))
+        self.gtShowCheckBox.stateChanged.connect(self.updateCanvasImage)
+        self.segShowCheckBox = QCheckBox("Seg:")
         self.segShowCheckBox.setChecked(True)
         self.segShowCheckBox.setLayoutDirection(Qt.RightToLeft)
         self.segShowCheckBox.setShortcut(QKeySequence(Qt.Key_S))
@@ -191,12 +200,19 @@ class MainWindow(QMainWindow, WindowMixin):
         self.segComputeDiceButton = QPushButton("Dice")
         self.segComputeDiceButton.setShortcut(QKeySequence(Qt.Key_Space))
         self.segComputeDiceButton.clicked.connect(self.computeDiceClicked)
+        self.stddev_str = QLabel("stddev:")
+        self.stddev = QSpinBox()
+        self.stddev.setRange(1, 20)
+        self.stddev.setValue(settings.get(SETTING_STDDEV, 5))
 
         segAlgLayout = QHBoxLayout()
         segAlgLayout.addWidget(segAlgLabel)
         segAlgLayout.addWidget(self.segAlgComboBox)
+        segAlgLayout.addWidget(self.gtShowCheckBox)
         segAlgLayout.addWidget(self.segShowCheckBox)
         segAlgLayout.addWidget(self.segComputeDiceButton)
+        segAlgLayout.addWidget(self.stddev_str)
+        segAlgLayout.addWidget(self.stddev)
         segAlgLayout.addItem(QSpacerItem(20, 10, QSizePolicy.Expanding, QSizePolicy.Minimum))
         self.segAlgContainer = QWidget()
         self.segAlgContainer.setLayout(segAlgLayout)
@@ -328,7 +344,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.scrollArea = scroll
         self.canvas.scrollRequest.connect(self.scrollRequest)
 
-        self.canvas.newShape.connect(self.newShape)
+        self.canvas.newRect.connect(self.newRect)
+        self.canvas.newPoint.connect(self.newPoint)
         self.canvas.shapeMoved.connect(self.setDirty)
         self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
         self.canvas.drawingPolygon.connect(self.toggleDrawingSensitive)
@@ -381,21 +398,12 @@ class MainWindow(QMainWindow, WindowMixin):
         color1 = action(getStr('boxLineColor'), self.chooseColor1,
                         'Ctrl+L', 'color_line', getStr('boxLineColorDetail'))
 
-        createMode = action(getStr('crtBox'), self.setCreateMode,
-                            'w', 'new', getStr('crtBoxDetail'), enabled=False)
-        createEllipseMode = action(getStr('crtEllipse'), self.setCreateEllipseMode,
-                                   'e', 'new', getStr('crtEllipseDetail'), enabled=False)
-        createPointMode = action(getStr('crtPoint'), self.setCreatePointMode,
-                                 'f', 'new', getStr('crtPointDetail'), enabled=False)
-        editMode = action('&Edit\nRectBox', self.setEditMode,
-                          'q', 'edit', u'Move and edit Boxs', enabled=False)
-
-        create = action(getStr('crtBox'), self.createShape,
+        createRect = action(getStr('crtBox'), self.createRect,
                         'w', 'new', getStr('crtBoxDetail'), enabled=False)
-        createEllipse = action(getStr('crtEllipse'), self.createEllipse,
-                               'e', 'new', getStr('crtEllipseDetail'), enabled=False)
         createPoint = action(getStr('crtPoint'), self.createPoint,
                              'f', 'new', getStr('crtPointDetail'), enabled=False)
+        createPointMode = action(getStr('crtPoint'), self.setCreatePointMode,
+                                 'f', 'new', getStr('crtPointDetail'), enabled=False)
         delete = action(getStr('delBox'), self.deleteSelectedShape,
                         'Delete', 'delete', getStr('delBoxDetail'), enabled=False)
         copy = action(getStr('dupBox'), self.copySelectedShape,
@@ -479,10 +487,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Store actions for further handling.
         self.actions = struct(save=save, saveAs=saveAs, open=open, close=close, resetAll=resetAll,
-                              lineColor=color1, create=create, createEllipse=createEllipse, createPoint=createPoint,
+                              lineColor=color1, createRect=createRect, createPoint=createPoint,
                               delete=delete, edit=edit, copy=copy,
-                              createMode=createMode, createEllipseMode=createEllipseMode, createPointMode=createPointMode,
-                              editMode=editMode, advancedMode=advancedMode,
+                              createPointMode=createPointMode,
+                              advancedMode=advancedMode,
                               shapeLineColor=shapeLineColor, shapeFillColor=shapeFillColor,
                               zoom=zoom, zoomIn=zoomIn, zoomOut=zoomOut, zoomOrg=zoomOrg,
                               fitWindow=fitWindow, fitWidth=fitWidth,
@@ -492,15 +500,15 @@ class MainWindow(QMainWindow, WindowMixin):
                               beginner=(), advanced=(),
                               editMenu=(edit, copy, delete,
                                         None, color1, self.drawSquaresOption),
-                              beginnerContext=(create, createEllipse, createPoint, edit, copy, delete),
-                              advancedContext=(createMode, createEllipseMode, createPointMode, editMode, edit, copy,
+                              beginnerContext=(createRect, createPoint, edit, copy, delete),
+                              advancedContext=(createRect, createPointMode, edit, copy,
                                                delete, shapeLineColor, shapeFillColor),
                               onLoadActive=(
-                                  close, create, createEllipse, createPoint,
-                                  createMode, createEllipseMode, createPointMode, editMode),
+                                  close, createRect, createPoint,
+                                  createRect, createPointMode),
                               onShapesPresent=(saveAs, hideAll, showAll),
                               createActions=(
-                                  create, createEllipse, createPoint
+                                  createRect, createPoint, createPointMode
                               ))
 
         self.menus = struct(
@@ -546,12 +554,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tools = self.toolbar('Tools')
         self.actions.beginner = (
             open, opendir, changeSavedir, openNextImg, openPrevImg, saveAs, None,
-            create, createEllipse, createPoint, copy, delete, None,
+            createRect, createPoint, copy, delete, None,
             zoomIn, zoom, zoomOut, fitWindow, fitWidth)
 
         self.actions.advanced = (
             open, opendir, changeSavedir, openNextImg, openPrevImg, save, None,
-            createMode, createEllipseMode, createPointMode, editMode, None,
+            createRect, createPointMode, None,
             hideAll, showAll)
 
         self.statusBar().showMessage('%s started.' % __appname__)
@@ -653,10 +661,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.populateModeActions()
         self.editButton.setVisible(not value)
         if value:
-            self.actions.createMode.setEnabled(True)
-            self.actions.createEllipseMode.setEnabled(True)
             self.actions.createPointMode.setEnabled(True)
-            self.actions.editMode.setEnabled(False)
             self.dock.setFeatures(self.dock.features() | self.dockFeatures)
         else:
             self.dock.setFeatures(self.dock.features() ^ self.dockFeatures)
@@ -669,9 +674,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tools.clear()
         addActions(self.tools, tool)
         self.menus.edit.clear()
-        actions = (self.actions.create, self.actions.createEllipse, self.actions.createPoint) if self.beginner()\
-            else (self.actions.createMode, self.actions.createEllipseMode, self.actions.createPointMode,
-                  self.actions.editMode)
+        actions = (self.actions.createRect, self.actions.createPoint) if self.beginner()\
+            else (self.actions.createRect, self.actions.createPointMode)
         addActions(self.menus.edit, actions + self.actions.editMenu)
 
     def setBeginner(self):
@@ -689,8 +693,7 @@ class MainWindow(QMainWindow, WindowMixin):
     def setClean(self):
         self.dirty = False
         self.actions.save.setEnabled(False)
-        self.actions.create.setEnabled(True)
-        self.actions.createEllipse.setEnabled(True)
+        self.actions.createRect.setEnabled(True)
         self.actions.createPoint.setEnabled(True)
 
     def toggleActions(self, value=True):
@@ -763,73 +766,46 @@ class MainWindow(QMainWindow, WindowMixin):
         msg = u'Name:{0} \nApp Version:{1} \n{2} '.format(__appname__, __version__, sys.version_info)
         QMessageBox.information(self, u'Information', msg)
 
-    def createShape(self):
-        assert self.beginner()
+    def createRect(self):
         self.canvas.setEditing(False, Shape.RECTANGLE)
-        self.actions.create.setEnabled(False)
-
-    def createEllipse(self):
-        assert self.beginner()
-        self.canvas.setEditing(False, Shape.ELLIPSE)
-        self.actions.createEllipse.setEnabled(False)
+        self.actions.createRect.setEnabled(False)
+        self.actions.createPoint.setEnabled(True)
+        self.actions.createPointMode.setEnabled(True)
 
     def createPoint(self):
         assert self.beginner()
         self.canvas.setEditing(False, Shape.POINT)
+        self.actions.createRect.setEnabled(True)
         self.actions.createPoint.setEnabled(False)
+        self.actions.createPointMode.setEnabled(False)
 
     def toggleDrawingSensitive(self, drawing=True):
         """In the middle of drawing, toggling between modes should be disabled."""
-        self.actions.editMode.setEnabled(not drawing)
         if not drawing and self.beginner():
             # Cancel creation.
             print('Cancel creation.')
             self.canvas.setEditing(True)
             self.canvas.restoreCursor()
-            self.actions.create.setEnabled(True)
-            self.actions.createEllipse.setEnabled(True)
+            self.actions.createRect.setEnabled(True)
             self.actions.createPoint.setEnabled(True)
 
     def toggleDrawMode(self, edit=True, drawType=None):
         self.canvas.setEditing(edit, drawType)
         if edit or drawType == Shape.RECTANGLE:
-            self.actions.createMode.setEnabled(edit)
-        else:
-            self.actions.createMode.setEnabled(not edit)
-        if edit or drawType == Shape.ELLIPSE:
-            self.actions.createEllipseMode.setEnabled(edit)
-        else:
-            self.actions.createEllipseMode.setEnabled(not edit)
+            self.actions.create.setEnabled(edit)
         if edit or drawType == Shape.POINT:
             self.actions.createPointMode.setEnabled(edit)
         else:
             self.actions.createPointMode.setEnabled(not edit)
-        self.actions.editMode.setEnabled(not edit)
-
-    def setCreateMode(self):
-        assert self.advanced()
-        self.toggleDrawMode(False, Shape.RECTANGLE)
-
-    def setCreateEllipseMode(self):
-        assert self.advanced()
-        self.toggleDrawMode(False, Shape.ELLIPSE)
 
     def setCreatePointMode(self):
         assert self.advanced()
         self.toggleDrawMode(False, Shape.POINT)
 
-    def setEditMode(self):
-        assert self.advanced()
-        self.toggleDrawMode(True)
-        self.labelSelectionChanged()
-
     def setEdit(self):
-        if self.beginner():  # Switch to edit mode.
-            self.canvas.setEditing(True)
-            for act in self.actions.createActions:
-                act.setEnabled(True)
-        else:
-            self.actions.editMode.setEnabled(True)
+        self.canvas.setEditing(True)
+        for act in self.actions.createActions:
+            act.setEnabled(True)
         self.canvas.restoreCursor()
 
     def updateFileMenu(self):
@@ -989,8 +965,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 shape.z2 = z2
             elif dtype == Shape.POINT:
                 shape = Point(label=label, foreground=fg)
-            elif dtype == Shape.ELLIPSE:
-                shape = Ellipse(label=label)
             else:
                 raise TypeError("Not recognized shape type:", dtype)
             
@@ -1105,18 +1079,23 @@ class MainWindow(QMainWindow, WindowMixin):
             self.labelTable.item(i, 4).setCheckState(state)
 
     # Callback functions:
-    def newShape(self):
-        """Pop-up and give focus to the label editor.
+    def newRect(self):
+        text = "rectangle"
+        generate_color = generateColorByText(text)
+        shape = self.canvas.setLastLabel(text, generate_color, generate_color)
+        self.addLabel(shape)
+        self.canvas.setEditing(True)
+        for act in self.actions.createActions:
+            act.setEnabled(True)
+        self.setDirty()
 
-        position MUST be in global coordinates.
-        """
+    def newPoint(self):
         self.segAlgButtonRun.setEnabled(True)
         if self.segAutoCheckBox.isChecked():
             self.segRun()
         if not self.useDefaultLabelCheckbox.isChecked() or not self.defaultLabelTextLine.text():
             if len(self.labelHist) > 0:
-                self.labelDialog = LabelDialog(
-                    parent=self, listItem=self.labelHist)
+                self.labelDialog = LabelDialog(parent=self, listItem=self.labelHist)
 
             # Sync single class mode from PR#106
             if self.singleClassMode.isChecked() and self.lastLabel:
@@ -1136,8 +1115,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.canvas.setEditing(True)
                 for act in self.actions.createActions:
                     act.setEnabled(True)
-            else:
-                self.actions.editMode.setEnabled(True)
             self.setDirty()
 
             if text not in self.labelHist:
@@ -1274,7 +1251,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.i3d = read3d(unicodeFilePath)
                 self.i3d.setIntensityClip(low=self.int_low.value(), high=self.int_high.value())
                 self.dim = THREE_D
-                self.ref = None
+                self.ref = self.i3d.label
             self.labelFile = None
             self.canvas.verified = False
 
@@ -1748,7 +1725,8 @@ class MainWindow(QMainWindow, WindowMixin):
         if isinstance(image, np.ndarray):
             self.image = image
         else:
-            self.image = self.i3d.at(self.idx, self.axis, self.segShowCheckBox.isChecked())
+            self.image = self.i3d.at(self.idx, self.axis, self.segShowCheckBox.isChecked(),
+                                     self.gtShowCheckBox.isChecked())
         self.sliceNumber.setText("Slice: {:3d} / Total: {:3d}".format(self.idx, self.i3d.shape[self.axis]))
         self.canvas.loadPixmap(QPixmap.fromImage(self.image))
 
@@ -1772,6 +1750,8 @@ class MainWindow(QMainWindow, WindowMixin):
             bbox = [None] * 6
             for key, shapes in self.canvas.shapes_3d.items():
                 for shape in shapes:
+                    if not self.canvas.isVisible(shape):
+                        continue
                     if shape.type_ == Shape.RECTANGLE:
                         x1, y1, w, h = shape.rect()
                         bbox[0] = int(shape.z1)
@@ -1781,13 +1761,25 @@ class MainWindow(QMainWindow, WindowMixin):
                         bbox[4] = int(y1 + h)
                         bbox[5] = int(x1 + w)
                     if shape.type_ == Shape.POINT:
-                        k = "fg" if shape.fg else "bg"
+                        if shape.fg:
+                            k = "fg"
+                            stddevs[k].append([1., self.stddev.value(), self.stddev.value()])
+                        else:
+                            k = "bg"
+                            stddevs[k].append([1., 5., 5.])
                         centers[k].append([int(DSKey.key2ds(key)[1]), int(shape.points[0].y()), int(shape.points[0].x())])
-                        stddevs[k].append([3., 5., 5.])
-            if segAlg == self.segAlg[0]:
+            if segAlg == "Test":
                 success = self.i3d.seg_test(bbox, centers, stddevs)
-            elif segAlg == self.segAlg[1]:
-                success = self.i3d.seg_gc(centers)
+            elif segAlg == "DIN":
+                success = self.i3d.seg_din(bbox, centers, stddevs, name, guide_type="exp")
+            elif segAlg == "EDT":
+                success = self.i3d.seg_din(bbox, centers, stddevs, name, guide_type="euc")
+            elif segAlg == "GDT":
+                success = self.i3d.seg_din(bbox, centers, stddevs, name, guide_type="geo")
+            elif segAlg == "Random Walk 3D":
+                success = self.i3d.seg_RW(bbox, centers)
+            else:
+                success = 1
             diff = time.time() - start
             if success == 0:
                 self.updateCanvasImage()
@@ -1873,6 +1865,15 @@ class MainWindow(QMainWindow, WindowMixin):
             self.i3d.color = color.getRgb()[:3]
             self.updateCanvasImage()
 
+    def segResColorPickerGT(self):
+        color = QColorDialog.getColor()
+        if sum(color.getRgb()[:3]) == 0:
+            return
+        if self.i3d is not None:
+            self.segGTColor.setStyleSheet("background-color: %s; color: white" % color.name())
+            self.i3d.colorGT = color.getRgb()[:3]
+            self.updateCanvasImage()
+
     def segResSliderChanged(self):
         if self.i3d is not None:
             value = self.segResSlider.value() / 100
@@ -1884,7 +1885,8 @@ class MainWindow(QMainWindow, WindowMixin):
             return
         if self.ref is None:
             ref_file = os.path.join(os.path.dirname(self.filePath),
-                                    os.path.basename(self.filePath).replace("img", "mask"))
+                                    os.path.basename(self.filePath).replace("img", "mask")
+                                    .replace("volume", "segmentation"))
             _, self.ref = read_nii(ref_file, out_dtype=np.uint8)
 
         # get bbox
