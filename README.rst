@@ -50,19 +50,19 @@ Supported image types:
 Note: !!! Important !!!
 ~~~~~~~~~~~~
 
-* Please install the required packages: 
-  * pyqt5
-  * lxml, tensorflow-gpu>=2, tensorflow-serving-api>=2, pygco (optional), nibabel, qimage2ndarray
-  * scikit-image, scipy, matplotlib
-* Support 3d image segmentation with tensorflow_serving_api.
-* Segmentation method:
-  * DIN: The exported model from [DINs](https://github.com/Jarvis73/DINs) with ExpDT. Need the model served by tensorflow-serving.
-  * EDT: The exported model from [DINs](https://github.com/Jarvis73/DINs) with EDT. Need the model served by tensorflow-serving.
-  * GDT: The exported model from [DINs](https://github.com/Jarvis73/DINs) with GDT. Need the model served by tensorflow-serving.
-  * GraphCut: Need the `pygco` installed.
-  * RandomWalk: The RandomWalk-3D.exe can not be released due to the copyright.
-* Tensorflow Serving:
-  * The serving host and port are specified inside the function `run_tf_serving()`. 
+- Please install the required packages: 
+  - pyqt5
+  - lxml, tensorflow-gpu>=2, tensorflow-serving-api>=2, pygco (optional), nibabel, qimage2ndarray
+  - scikit-image, scipy, matplotlib
+- Support 3d image segmentation with tensorflow_serving_api.
+- Segmentation method:
+  - DIN: The exported model from [DINs](https://github.com/Jarvis73/DINs) with ExpDT. Need the model served by tensorflow-serving.
+  - EDT: The exported model from [DINs](https://github.com/Jarvis73/DINs) with EDT. Need the model served by tensorflow-serving.
+  - GDT: The exported model from [DINs](https://github.com/Jarvis73/DINs) with GDT. Need the model served by tensorflow-serving.
+  - GraphCut: Need the `pygco` installed.
+  - RandomWalk: The RandomWalk-3D.exe can not be released due to the copyright.
+- Tensorflow Serving:
+  - The serving host and port are specified inside the function `run_tf_serving()`. 
 
 Installation
 ------------------
